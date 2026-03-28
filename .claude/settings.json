@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "java -jar /home/kamil/Documents/Project/My/Mcp/code-graph/code-graph.run mark-dirty",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "java -jar /home/kamil/Documents/Project/My/Mcp/code-graph/code-graph.run sync-if-dirty"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,97 @@
+{
+  "strong_keywords": {
+    "research": [
+      "explore",
+      "find",
+      "search",
+      "understand",
+      "what is",
+      "how does",
+      "where is",
+      "look for",
+      "investigate",
+      "analyze",
+      "examine",
+      "discover"
+    ],
+    "architecture": [
+      "design",
+      "plan",
+      "architect",
+      "structure",
+      "approach",
+      "strategy",
+      "blueprint",
+      "diagram",
+      "system design",
+      "high-level",
+      "overview"
+    ],
+    "implementation": [
+      "implement",
+      "add feature",
+      "create new",
+      "build feature",
+      "develop",
+      "write code",
+      "new feature",
+      "add functionality",
+      "add method",
+      "add class"
+    ],
+    "refactoring": [
+      "refactor",
+      "rename",
+      "extract",
+      "move",
+      "clean up",
+      "reorganize",
+      "restructure",
+      "simplify",
+      "optimize code",
+      "improve code",
+      "remove class",
+      "remove method",
+      "delete and references",
+      "dead code",
+      "unused",
+      "find and remove"
+    ],
+    "testing": [
+      "test",
+      "spec",
+      "coverage",
+      "assert",
+      "mock",
+      "unit test",
+      "integration test",
+      "e2e test",
+      "verify",
+      "validate"
+    ],
+    "debugging": [
+      "debug",
+      "fix bug",
+      "broken",
+      "failing",
+      "stacktrace",
+      "exception",
+      "error trace",
+      "root cause",
+      "not working",
+      "crash"
+    ]
+  },
+  "weak_keywords": {
+    "research": ["check", "see", "look"],
+    "architecture": ["think about", "consider"],
+    "implementation": ["fix", "update", "change"],
+    "refactoring": ["cleanup", "tidy"],
+    "testing": ["run tests", "check tests"],
+    "debugging": ["error", "issue", "problem", "wrong"]
+  },
+  "keyword_weight": {
+    "strong": 3,
+    "weak": 1
+  }
+}

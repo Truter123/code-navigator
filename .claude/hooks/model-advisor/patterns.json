@@ -1,0 +1,99 @@
+{
+  "tool_patterns": {
+    "research": {
+      "tools": ["Grep", "Glob", "WebSearch", "WebFetch"],
+      "tool_prefixes": ["mcp__context7__"],
+      "bash_patterns": ["grep", "find", "ls", "cat", "head", "tail"],
+      "file_patterns": [],
+      "agent_types": ["Explore"]
+    },
+    "architecture": {
+      "tools": [],
+      "tool_prefixes": [],
+      "bash_patterns": [],
+      "file_patterns": ["docs/plans/*", "*.design.md", "ARCHITECTURE.md"],
+      "agent_types": ["Plan"]
+    },
+    "implementation": {
+      "tools": ["Edit", "Write"],
+      "tool_prefixes": [],
+      "bash_patterns": ["gradlew build", "npm run build", "npm install", "gradlew bootRun"],
+      "file_patterns": ["src/**/*.java", "src/**/*.ts", "src/**/*.tsx", "src/**/*.html"],
+      "agent_types": []
+    },
+    "refactoring": {
+      "tools": ["Edit"],
+      "tool_prefixes": [],
+      "bash_patterns": [],
+      "file_patterns": [],
+      "agent_types": []
+    },
+    "testing": {
+      "tools": ["Edit", "Write"],
+      "tool_prefixes": [],
+      "bash_patterns": ["gradlew test", "npm test", "npm run test", "jest", "pytest"],
+      "file_patterns": ["**/test/**", "**/*Test.java", "**/*.spec.ts", "**/*.test.ts"],
+      "agent_types": []
+    },
+    "debugging": {
+      "tools": [],
+      "tool_prefixes": [],
+      "bash_patterns": ["gradlew test --debug", "npm run debug", "stacktrace"],
+      "file_patterns": [],
+      "agent_types": []
+    },
+    "multi_agent": {
+      "tools": ["Task"],
+      "tool_prefixes": [],
+      "bash_patterns": [],
+      "file_patterns": [],
+      "agent_types": []
+    }
+  },
+  "model_mapping": {
+    "research": {
+      "model": "gemini-flash",
+      "full_name": "Gemini Flash",
+      "icon": "🔍",
+      "label": "Research"
+    },
+    "architecture": {
+      "model": "opus",
+      "full_name": "Opus 4.6",
+      "icon": "🏗️",
+      "label": "Architecture"
+    },
+    "implementation": {
+      "model": "sonnet",
+      "full_name": "Sonnet 4.6",
+      "icon": "💻",
+      "label": "Implement"
+    },
+    "refactoring": {
+      "model": "sonnet",
+      "full_name": "Sonnet 4.6",
+      "icon": "♻️",
+      "label": "Refactor"
+    },
+    "debugging": {
+      "model": "smart:sonnet|gemini-flash+sonnet",
+      "full_name": "Smart: Sonnet or Gemini Flash → Sonnet",
+      "icon": "🐛",
+      "label": "Debug"
+    },
+    "testing": {
+      "model": "haiku",
+      "full_name": "Haiku 4.5",
+      "icon": "🧪",
+      "label": "Testing"
+    },
+    "multi_agent": {
+      "model": "sonnet+haiku",
+      "full_name": "Sonnet 4.6 + Haiku 4.5",
+      "icon": "🤖",
+      "label": "Multi-Agent"
+    }
+  },
+  "default_phase": "research",
+  "debounce_count": 3
+}
