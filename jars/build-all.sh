@@ -22,6 +22,14 @@ cd "$MCP_DIR/domain-navigator"
 cp build/libs/domain-navigator-0.1.0.jar "$SCRIPT_DIR/domain-navigator.jar"
 echo "  -> domain-navigator.jar"
 
+# what-did
+echo ""
+echo "Building what-did..."
+cd "$MCP_DIR/what-did"
+./gradlew shadowJar -q
+cp build/libs/what-did-0.1.0.jar "$SCRIPT_DIR/what-did.jar"
+echo "  -> what-did.jar"
+
 echo ""
 echo "=== All JARs built ==="
 ls -lh "$SCRIPT_DIR"/*.jar
