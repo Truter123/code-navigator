@@ -1,5 +1,6 @@
 package com.whatdid;
 
+import com.whatdid.cli.ServeCommand;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
 
@@ -7,7 +8,10 @@ import picocli.CommandLine.Command;
     name = "what-did",
     mixinStandardHelpOptions = true,
     version = "0.1.0",
-    description = "Track developer activity across git repos"
+    description = "Track developer activity across git repos",
+    subcommands = {
+        ServeCommand.class
+    }
 )
 public class WhatDidApplication implements Runnable {
 
