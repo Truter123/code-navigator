@@ -39,5 +39,5 @@ cd domain-navigator && ./gradlew shadowJar
 
 - Both projects use the Shadow Gradle plugin to produce fat JARs
 - Version for both: `0.1.0`
-- Both MCPs store data in `.data/` inside indexed projects (graph.db, domain.db)
+- Both MCPs store data in `navigators/` inside indexed projects (code-navigator.db, domain-navigator.db)
 - domain-navigator uses `DOMAIN_PROJECTS` env var to specify which projects to serve

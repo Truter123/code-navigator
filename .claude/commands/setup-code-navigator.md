@@ -18,7 +18,7 @@ Confirm permissions were added to `.claude/settings.local.json`.
 
 ## Step 3: Ask about initializing the current project
 
-Check if `.data/graph.db` exists in the current project directory.
+Check if `navigators/code-navigator.db` exists in the current project directory.
 
 If it does NOT exist, ask the user: "Do you want to initialize code-navigator for this project now? This will do a full index of the codebase."
 
