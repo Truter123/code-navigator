@@ -72,8 +72,8 @@ digraph brainstorming {
 
 Before asking any questions, ALWAYS gather context from these two sources in parallel:
 
-### Code Graph MCP
-Use code-graph tools to understand the current codebase structure relevant to the topic:
+### Code Navigator MCP
+Use code-navigator tools to understand the current codebase structure relevant to the topic:
 - `cg_map` — get system-wide overview of all aggregates and relationships
 - `cg_context("<topic description>")` — find all files relevant to the brainstorming topic
 - `cg_overview("<aggregate>")` — deep dive into specific aggregates the topic touches
@@ -92,7 +92,7 @@ Read the domain files relevant to the topic:
 
 **Understanding the idea:**
 
-- Gather context from code-graph and domain files first (see Context Gathering above)
+- Gather context from code-navigator and domain files first (see Context Gathering above)
 - Before asking detailed questions, assess scope: if the request describes multiple independent subsystems (e.g., "build a platform with chat, file storage, billing, and analytics"), flag this immediately. Don't spend questions refining details of a project that needs to be decomposed first.
 - If the project is too large for a single spec, help the user decompose into sub-projects: what are the independent pieces, how do they relate, what order should they be built? Then brainstorm the first sub-project through the normal design flow. Each sub-project gets its own spec → plan → implementation cycle.
 - For appropriately-scoped projects, ask questions one at a time to refine the idea
