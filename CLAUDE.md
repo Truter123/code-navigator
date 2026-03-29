@@ -13,21 +13,18 @@ Monorepo for two custom MCP servers: **code-navigator** and **domain-navigator**
 # Build individually
 cd code-navigator && ./gradlew shadowJar
 cd domain-navigator && ./gradlew shadowJar
-cd what-did && ./gradlew shadowJar
 ```
 
 ## Project Structure
 
 - `code-navigator/` — Code navigator MCP server. Indexes Java codebases into a SQLite-backed graph (nodes: controllers, commands, handlers, aggregates, events, projections; edges: calls, handles, emits, etc.). 11 MCP tools for navigation and impact analysis.
 - `domain-navigator/` — Domain knowledge MCP server. Extracts and serves business domain concepts (bounded contexts, entities, glossary, flows, rules) from code-navigator data. 6 MCP tools.
-- `what-did/` — Activity tracking MCP server. Scans git repos for commits, groups into sessions, provides meeting-ready summaries. 8 MCP tools.
 - `jars/` — Pre-built JARs and runner scripts for both servers.
 
 ## MCP Servers Available
 
 - **code-navigator** — defined in `code-navigator/.mcp.json`, tools prefixed `cg_*`
 - **domain-navigator** — configured externally, tools prefixed `dm_*`
-- **what-did** — configured externally, tools prefixed `whatdid_*`
 - **my-mcp** — configured externally, provides `activity_today`, `kb_list`, `activity_repos`
 
 ## Key Dependencies
