@@ -321,7 +321,7 @@ Gradle with Shadow plugin. Angular built as a pre-step:
 - `org.xerial:sqlite-jdbc:3.47.2.0`
 - `com.fasterxml.jackson.core:jackson-databind:2.18.2`
 - `info.picocli:picocli:4.7.6`
-- `io.javalin:javalin:6.x` (embedded HTTP server)
+- `io.javalin:javalin:7.0.1` (embedded HTTP server)
 - Angular 19, Tailwind CSS, ngx-charts, cytoscape.js (frontend)
 
 ### Build Requirements
