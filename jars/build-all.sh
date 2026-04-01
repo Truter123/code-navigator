@@ -22,6 +22,14 @@ cd "$MCP_DIR/domain-navigator"
 cp build/libs/domain-navigator-0.1.0.jar "$SCRIPT_DIR/domain-navigator.jar"
 echo "  -> domain-navigator.jar"
 
+# agent-memory
+echo ""
+echo "Building agent-memory..."
+cd "$MCP_DIR/agent-memory"
+./gradlew shadowJar -q
+cp build/libs/agent-memory-0.1.0.jar "$SCRIPT_DIR/agent-memory.jar"
+echo "  -> agent-memory.jar"
+
 echo ""
 echo "=== All JARs built ==="
 ls -lh "$SCRIPT_DIR"/*.jar
