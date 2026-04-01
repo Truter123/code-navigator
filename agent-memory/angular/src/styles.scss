@@ -1,0 +1,21 @@
+@use "tailwindcss";
+
+:root {
+  --bg-primary: #0f1117;
+  --bg-secondary: #1a1d27;
+  --bg-card: #222533;
+  --text-primary: #e4e4e7;
+  --text-secondary: #a1a1aa;
+  --accent: #f97316;
+  --accent-hover: #fb923c;
+  --border: #2e3344;
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', system-ui, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+* { box-sizing: border-box; }

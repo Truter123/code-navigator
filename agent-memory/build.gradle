@@ -53,6 +53,13 @@ shadowJar {
     mergeServiceFiles()
 }
 
+tasks.register('buildAngular', Exec) {
+    workingDir file('angular')
+    commandLine 'npx', 'ng', 'build', '--output-path', '../src/main/resources/static'
+}
+
+processResources.dependsOn buildAngular
+
 distTar.dependsOn shadowJar
 distZip.dependsOn shadowJar
 startScripts.dependsOn shadowJar
