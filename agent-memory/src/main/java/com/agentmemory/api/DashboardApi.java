@@ -67,7 +67,7 @@ public class DashboardApi {
             memories = memoryStore.list(agent, project, tags, shared, limit, offset);
         }
 
-        ctx.json(memories);
+        ctx.json(memories.stream().map(this::mapMemory).collect(Collectors.toList()));
     }
 
     private void getMemory(Context ctx) {
@@ -77,7 +77,7 @@ public class DashboardApi {
             ctx.status(404).json(Map.of("error", "Memory not found"));
             return;
         }
-        ctx.json(memory.get());
+        ctx.json(mapMemory(memory.get()));
     }
 
     private void getMemoryVersions(Context ctx) {
@@ -89,7 +89,7 @@ public class DashboardApi {
         }
         Memory m = memory.get();
         List<MemoryVersion> versions = memoryStore.getVersions(m.key(), m.agent(), m.project());
-        ctx.json(versions);
+        ctx.json(versions.stream().map(this::mapVersion).collect(Collectors.toList()));
     }
 
     @SuppressWarnings("unchecked")
@@ -154,7 +154,7 @@ public class DashboardApi {
                 entries.stream().map(AuditEntry::createdAt).min(String::compareTo).orElse(null);
 
         Map<String, Object> metrics = new LinkedHashMap<>();
-        metrics.put("agent", agent);
+        metrics.put("name", agent);
         metrics.put("avgWriteLatency", avgWriteLatency);
         metrics.put("avgReadLatency", avgReadLatency);
         metrics.put("totalWrites", totalWrites);
@@ -269,7 +269,7 @@ public class DashboardApi {
         int offset = intParam(ctx, "offset", 0);
 
         List<AuditEntry> entries = memoryStore.getAuditLog(agent, operation, from, to, limit, offset);
-        ctx.json(entries);
+        ctx.json(entries.stream().map(this::mapAuditEntry).collect(Collectors.toList()));
     }
 
     private void getTimeseries(Context ctx) {
@@ -280,13 +280,9 @@ public class DashboardApi {
 
         List<AuditEntry> entries = memoryStore.getAuditLog(agent, null, from, to, limit, 0);
 
-        List<Map<String, Object>> timeseries = entries.stream().map(e -> {
-            Map<String, Object> point = new LinkedHashMap<>();
-            point.put("timestamp", e.createdAt());
-            point.put("operation", e.operation());
-            point.put("latencyMs", e.latencyMs());
-            return point;
-        }).collect(Collectors.toList());
+        List<Map<String, Object>> timeseries = entries.stream()
+                .map(this::mapAuditEntry)
+                .collect(Collectors.toList());
 
         ctx.json(timeseries);
     }
@@ -319,6 +315,42 @@ public class DashboardApi {
             memoryStore.setSetting(entry.getKey(), entry.getValue());
         }
         ctx.json(memoryStore.getAllSettings());
+    }
+
+    private Map<String, Object> mapAuditEntry(AuditEntry e) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", e.id());
+        m.put("agentName", e.agent());
+        m.put("operation", e.operation());
+        m.put("key", e.memoryKey());
+        m.put("details", e.details());
+        m.put("latencyMs", e.latencyMs());
+        m.put("timestamp", e.createdAt());
+        return m;
+    }
+
+    private Map<String, Object> mapMemory(Memory mem) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", mem.id());
+        m.put("key", mem.key());
+        m.put("value", mem.value());
+        m.put("agentName", mem.agent());
+        m.put("project", mem.project());
+        m.put("shared", mem.shared());
+        m.put("importance", mem.importance());
+        m.put("tags", mem.tags());
+        m.put("createdAt", mem.createdAt());
+        m.put("updatedAt", mem.updatedAt());
+        return m;
+    }
+
+    private Map<String, Object> mapVersion(MemoryVersion v) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", v.id());
+        m.put("version", v.version());
+        m.put("content", v.value());
+        m.put("timestamp", v.createdAt());
+        return m;
     }
 
     private int intParam(Context ctx, String name, int defaultValue) {
