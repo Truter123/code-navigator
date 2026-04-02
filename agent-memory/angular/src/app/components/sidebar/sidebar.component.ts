@@ -1,5 +1,7 @@
 import { Component } from '@angular/core';
 import { RouterLink, RouterLinkActive } from '@angular/router';
+import { AsyncPipe } from '@angular/common';
+import { WebSocketService } from '../../services/ws.service';
 
 interface NavItem {
   label: string;
@@ -15,12 +17,16 @@ interface NavGroup {
 @Component({
   selector: 'app-sidebar',
   standalone: true,
-  imports: [RouterLink, RouterLinkActive],
+  imports: [RouterLink, RouterLinkActive, AsyncPipe],
   template: `
     <aside class="sidebar">
       <div class="logo">
         <span class="logo-icon">&#9679;</span>
         <span class="logo-text">Agent Memory</span>
+      </div>
+      <div class="ws-status">
+        <span class="ws-dot" [class.connected]="ws.connected$ | async"></span>
+        <span class="ws-label">{{ (ws.connected$ | async) ? 'Live' : 'Reconnecting...' }}</span>
       </div>
       @for (group of navGroups; track group.title) {
         <div class="nav-group">
@@ -99,9 +105,29 @@ interface NavGroup {
       width: 20px;
       text-align: center;
     }
+    .ws-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 20px 16px;
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+    .ws-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #ef4444;
+      transition: background 0.3s;
+    }
+    .ws-dot.connected {
+      background: #22c55e;
+    }
   `]
 })
 export class SidebarComponent {
+  constructor(public ws: WebSocketService) {}
+
   navGroups: NavGroup[] = [
     {
       title: 'Monitoring',
