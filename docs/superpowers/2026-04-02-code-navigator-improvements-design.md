@@ -14,28 +14,28 @@ Inspired by [ai-codex](https://github.com/skibidiskib/ai-codex) (static markdown
 
 ---
 
-## Feature 1: Compact Index Generation (`codex`)
+## Feature 1: Compact Index Generation (`briefing`)
 
 ### CLI Command
 
 ```bash
-code-navigator codex <path> [--output .ai-codex]
+code-navigator briefing <path> [--output .ai-briefing]
 ```
 
 ### MCP Tool
 
 ```
-cg_codex(projectPath?, output?)
+cg_briefing(projectPath?, output?)
 ```
 
 ### New Classes
 
-- `com.codenavigator.codex.CodexGenerator` — reads both DBs, generates markdown files
-- `com.codenavigator.cli.CodexCommand` — picocli subcommand
+- `com.codenavigator.briefing.BriefingGenerator` — reads both DBs, generates markdown files
+- `com.codenavigator.cli.BriefingCommand` — picocli subcommand
 
 ### Data Sources
 
-CodexGenerator reads two databases:
+BriefingGenerator reads two databases:
 1. `navigators/code/code-navigator.db` (always present)
 2. `navigators/domain/domain-navigator.db` (optional — if missing, only structural files are generated)
 
@@ -46,7 +46,7 @@ CodexGenerator reads two databases:
 System-level summary. One glance gives you the project shape.
 
 ```markdown
-# Project Codex (generated 2026-04-02)
+# Project Briefing (generated 2026-04-02)
 Tier: DDD | 142 nodes | 89 edges | 34 files
 
 ## Modules
@@ -164,7 +164,7 @@ Business invariants and constraints.
 ### Generation Logic
 
 ```java
-public class CodexGenerator {
+public class BriefingGenerator {
     private final GraphStore codeStore;
     private final DomainSqliteStore domainStore; // nullable
 
@@ -184,7 +184,7 @@ public class CodexGenerator {
 
 ### Domain DB Access
 
-CodexGenerator needs to read domain-navigator's SQLite DB. Two approaches:
+BriefingGenerator needs to read domain-navigator's SQLite DB. Two approaches:
 
 **Chosen approach:** Direct SQLite read with a lightweight `DomainDbReader` class in code-navigator that opens `navigators/domain/domain-navigator.db` read-only and executes the needed SELECT queries. No dependency on domain-navigator's code — just raw SQL reads against a known schema. This keeps the projects decoupled.
 
@@ -455,7 +455,7 @@ Map<String, List<Node>> byPackage = getAllNodes().stream()
 
 | Feature | New Files | Est. Lines | New Deps | Schema Changes |
 |---------|-----------|-----------|----------|----------------|
-| Codex Generation | `CodexGenerator.java`, `CodexCommand.java`, `DomainDbReader.java` | ~300 | None | None |
+| Briefing Generation | `BriefingGenerator.java`, `BriefingCommand.java`, `DomainDbReader.java` | ~300 | None | None |
 | Dead Code | Method + handler | ~45 | None | None |
 | Hotspots | Method + handler | ~65 | None | None |
 | Export Formats | `ExportService.java`, `ExportCommand.java` | ~200 | None | None |
@@ -467,4 +467,4 @@ Map<String, List<Node>> byPackage = getAllNodes().stream()
 1. **Dead code + Hotspots** — smallest, validates the pattern of adding new tools
 2. **Package graph** — medium, standalone
 3. **Export formats** — medium, new service class + CLI command
-4. **Codex generation** — largest, depends on understanding all data available from both DBs
+4. **Briefing generation** — largest, depends on understanding all data available from both DBs

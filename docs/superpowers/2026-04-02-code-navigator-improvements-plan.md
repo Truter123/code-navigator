@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add 5 analysis/export features to code-navigator: dead code detection, hotspot analysis, package dependency graph, export formats (JSON/Mermaid/PlantUML), and compact index generation (codex) that reads both code-navigator and domain-navigator databases.
+**Goal:** Add 5 analysis/export features to code-navigator: dead code detection, hotspot analysis, package dependency graph, export formats (JSON/Mermaid/PlantUML), and compact index generation (briefing) that reads both code-navigator and domain-navigator databases.
 
-**Architecture:** All features are pure read queries on the existing SQLite graph database — no schema changes, no new dependencies. New MCP tools are added to `CodeNavigatorMcpServer` following the existing pattern (tool builder + handler method). Two features also get CLI commands (`codex` and `export`). The codex feature reads domain-navigator's DB via a lightweight `DomainDbReader` using raw JDBC — no code dependency on domain-navigator.
+**Architecture:** All features are pure read queries on the existing SQLite graph database — no schema changes, no new dependencies. New MCP tools are added to `CodeNavigatorMcpServer` following the existing pattern (tool builder + handler method). Two features also get CLI commands (`briefing` and `export`). The briefing feature reads domain-navigator's DB via a lightweight `DomainDbReader` using raw JDBC — no code dependency on domain-navigator.
 
 **Tech Stack:** Java 21, SQLite JDBC 3.47.2.0, Picocli 4.7.6, Jackson 2.18.2, JUnit 5 + AssertJ
 
@@ -20,16 +20,16 @@
 | `code-navigator/src/main/java/com/codenavigator/mcp/CodeNavigatorMcpServer.java` | Modify | Register 4 new MCP tools (`cg_dead`, `cg_hotspots`, `cg_packages`, `cg_export`), add handler methods |
 | `code-navigator/src/main/java/com/codenavigator/export/ExportService.java` | Create | JSON, Mermaid, PlantUML formatting from node/edge lists |
 | `code-navigator/src/main/java/com/codenavigator/cli/ExportCommand.java` | Create | `code-navigator export` picocli subcommand |
-| `code-navigator/src/main/java/com/codenavigator/codex/CodexGenerator.java` | Create | Read both DBs, generate 3-6 markdown files to `.ai-codex/` |
-| `code-navigator/src/main/java/com/codenavigator/codex/DomainDbReader.java` | Create | Read-only JDBC access to domain-navigator.db (contexts, flows, rules, entities, terms) |
-| `code-navigator/src/main/java/com/codenavigator/cli/CodexCommand.java` | Create | `code-navigator codex` picocli subcommand |
-| `code-navigator/src/main/java/com/codenavigator/CodeNavigatorApplication.java` | Modify | Register `CodexCommand` and `ExportCommand` subcommands |
+| `code-navigator/src/main/java/com/codenavigator/briefing/BriefingGenerator.java` | Create | Read both DBs, generate 3-6 markdown files to `.ai-briefing/` |
+| `code-navigator/src/main/java/com/codenavigator/briefing/DomainDbReader.java` | Create | Read-only JDBC access to domain-navigator.db (contexts, flows, rules, entities, terms) |
+| `code-navigator/src/main/java/com/codenavigator/cli/BriefingCommand.java` | Create | `code-navigator briefing` picocli subcommand |
+| `code-navigator/src/main/java/com/codenavigator/CodeNavigatorApplication.java` | Modify | Register `BriefingCommand` and `ExportCommand` subcommands |
 | `code-navigator/src/main/java/com/codenavigator/cli/ProjectPaths.java` | Modify | Add `domainDb()` path helper |
 | `code-navigator/src/test/java/com/codenavigator/graph/GraphStoreTest.java` | Modify | Add tests for `findDeadNodes()` and `findHotspots()` |
 | `code-navigator/src/test/java/com/codenavigator/mcp/CodeNavigatorMcpServerTest.java` | Modify | Add tests for `cg_dead`, `cg_hotspots`, `cg_packages`, `cg_export` handlers |
 | `code-navigator/src/test/java/com/codenavigator/export/ExportServiceTest.java` | Create | Unit tests for JSON/Mermaid/PlantUML formatting |
-| `code-navigator/src/test/java/com/codenavigator/codex/CodexGeneratorTest.java` | Create | Integration test: populate a GraphStore, run codex, assert file contents |
-| `code-navigator/src/test/java/com/codenavigator/codex/DomainDbReaderTest.java` | Create | Unit test: create domain DB, read via DomainDbReader, assert data |
+| `code-navigator/src/test/java/com/codenavigator/briefing/BriefingGeneratorTest.java` | Create | Integration test: populate a GraphStore, run briefing, assert file contents |
+| `code-navigator/src/test/java/com/codenavigator/briefing/DomainDbReaderTest.java` | Create | Unit test: create domain DB, read via DomainDbReader, assert data |
 | `CLAUDE.md` | Modify | Update tool count (11 → 15), remove `my-mcp` from MCP Servers Available |
 
 ---
@@ -1053,8 +1053,8 @@ git commit -m "feat(code-navigator): add cg_export MCP tool and export CLI comma
 ## Task 8: Domain DB Reader
 
 **Files:**
-- Create: `code-navigator/src/main/java/com/codenavigator/codex/DomainDbReader.java`
-- Test: `code-navigator/src/test/java/com/codenavigator/codex/DomainDbReaderTest.java`
+- Create: `code-navigator/src/main/java/com/codenavigator/briefing/DomainDbReader.java`
+- Test: `code-navigator/src/test/java/com/codenavigator/briefing/DomainDbReaderTest.java`
 - Modify: `code-navigator/src/main/java/com/codenavigator/cli/ProjectPaths.java`
 
 - [ ] **Step 1: Add domain DB path helper**
@@ -1079,7 +1079,7 @@ public static boolean hasDomainIndex(Path projectRoot) {
 Create `DomainDbReaderTest.java`:
 
 ```java
-package com.codenavigator.codex;
+package com.codenavigator.briefing;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -1174,15 +1174,15 @@ class DomainDbReaderTest {
 
 - [ ] **Step 3: Run tests to verify they fail**
 
-Run: `cd code-navigator && ./gradlew test --tests "com.codenavigator.codex.DomainDbReaderTest" -q`
+Run: `cd code-navigator && ./gradlew test --tests "com.codenavigator.briefing.DomainDbReaderTest" -q`
 Expected: Compilation error — `DomainDbReader` does not exist
 
 - [ ] **Step 4: Implement DomainDbReader**
 
-Create `code-navigator/src/main/java/com/codenavigator/codex/DomainDbReader.java`:
+Create `code-navigator/src/main/java/com/codenavigator/briefing/DomainDbReader.java`:
 
 ```java
-package com.codenavigator.codex;
+package com.codenavigator.briefing;
 
 import java.nio.file.Path;
 import java.sql.*;
@@ -1323,30 +1323,30 @@ public class DomainDbReader implements AutoCloseable {
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cd code-navigator && ./gradlew test --tests "com.codenavigator.codex.DomainDbReaderTest" -q`
+Run: `cd code-navigator && ./gradlew test --tests "com.codenavigator.briefing.DomainDbReaderTest" -q`
 Expected: PASS
 
 - [ ] **Step 6: Commit**
 
 ```bash
-cd code-navigator && git add src/main/java/com/codenavigator/codex/DomainDbReader.java src/main/java/com/codenavigator/cli/ProjectPaths.java src/test/java/com/codenavigator/codex/DomainDbReaderTest.java
-git commit -m "feat(code-navigator): add DomainDbReader for cross-DB codex generation"
+cd code-navigator && git add src/main/java/com/codenavigator/briefing/DomainDbReader.java src/main/java/com/codenavigator/cli/ProjectPaths.java src/test/java/com/codenavigator/briefing/DomainDbReaderTest.java
+git commit -m "feat(code-navigator): add DomainDbReader for cross-DB briefing generation"
 ```
 
 ---
 
-## Task 9: Codex Generator
+## Task 9: Briefing Generator
 
 **Files:**
-- Create: `code-navigator/src/main/java/com/codenavigator/codex/CodexGenerator.java`
-- Test: `code-navigator/src/test/java/com/codenavigator/codex/CodexGeneratorTest.java`
+- Create: `code-navigator/src/main/java/com/codenavigator/briefing/BriefingGenerator.java`
+- Test: `code-navigator/src/test/java/com/codenavigator/briefing/BriefingGeneratorTest.java`
 
 - [ ] **Step 1: Write the failing test**
 
-Create `CodexGeneratorTest.java`:
+Create `BriefingGeneratorTest.java`:
 
 ```java
-package com.codenavigator.codex;
+package com.codenavigator.briefing;
 
 import com.codenavigator.graph.*;
 import org.junit.jupiter.api.AfterEach;
@@ -1360,7 +1360,7 @@ import java.nio.file.Path;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-class CodexGeneratorTest {
+class BriefingGeneratorTest {
 
     @TempDir Path tempDir;
     private GraphStore store;
@@ -1369,7 +1369,7 @@ class CodexGeneratorTest {
     @BeforeEach
     void setUp() {
         store = new GraphStore(tempDir.resolve("code.db"));
-        outputDir = tempDir.resolve(".ai-codex");
+        outputDir = tempDir.resolve(".ai-briefing");
 
         // Build DDD test graph
         store.setConfig("tier", "DDD");
@@ -1398,7 +1398,7 @@ class CodexGeneratorTest {
 
     @Test
     void generatesOverviewFile() throws IOException {
-        new CodexGenerator(store, null).generate(outputDir);
+        new BriefingGenerator(store, null).generate(outputDir);
 
         String content = Files.readString(outputDir.resolve("overview.md"));
         assertThat(content).contains("DDD");
@@ -1408,7 +1408,7 @@ class CodexGeneratorTest {
 
     @Test
     void generatesEndpointsFile() throws IOException {
-        new CodexGenerator(store, null).generate(outputDir);
+        new BriefingGenerator(store, null).generate(outputDir);
 
         String content = Files.readString(outputDir.resolve("endpoints.md"));
         assertThat(content).contains("OrderController");
@@ -1417,7 +1417,7 @@ class CodexGeneratorTest {
 
     @Test
     void generatesProjectionsFile() throws IOException {
-        new CodexGenerator(store, null).generate(outputDir);
+        new BriefingGenerator(store, null).generate(outputDir);
 
         String content = Files.readString(outputDir.resolve("projections.md"));
         assertThat(content).contains("OrderListProjection");
@@ -1427,7 +1427,7 @@ class CodexGeneratorTest {
 
     @Test
     void skipsDomainFilesWhenNoDomainDb() throws IOException {
-        new CodexGenerator(store, null).generate(outputDir);
+        new BriefingGenerator(store, null).generate(outputDir);
 
         assertThat(outputDir.resolve("domain.md")).doesNotExist();
         assertThat(outputDir.resolve("flows.md")).doesNotExist();
@@ -1438,15 +1438,15 @@ class CodexGeneratorTest {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd code-navigator && ./gradlew test --tests "com.codenavigator.codex.CodexGeneratorTest" -q`
-Expected: Compilation error — `CodexGenerator` does not exist
+Run: `cd code-navigator && ./gradlew test --tests "com.codenavigator.briefing.BriefingGeneratorTest" -q`
+Expected: Compilation error — `BriefingGenerator` does not exist
 
-- [ ] **Step 3: Implement CodexGenerator**
+- [ ] **Step 3: Implement BriefingGenerator**
 
-Create `code-navigator/src/main/java/com/codenavigator/codex/CodexGenerator.java`:
+Create `code-navigator/src/main/java/com/codenavigator/briefing/BriefingGenerator.java`:
 
 ```java
-package com.codenavigator.codex;
+package com.codenavigator.briefing;
 
 import com.codenavigator.graph.*;
 
@@ -1459,12 +1459,12 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
-public class CodexGenerator {
+public class BriefingGenerator {
 
     private final GraphStore store;
     private final DomainDbReader domainReader; // nullable
 
-    public CodexGenerator(GraphStore store, DomainDbReader domainReader) {
+    public BriefingGenerator(GraphStore store, DomainDbReader domainReader) {
         this.store = store;
         this.domainReader = domainReader;
     }
@@ -1491,7 +1491,7 @@ public class CodexGenerator {
             n -> extractModulePackage(n.qualifiedName()), LinkedHashMap::new, Collectors.toList()));
 
         var sb = new StringBuilder();
-        sb.append("# Project Codex (generated ").append(LocalDate.now()).append(")\n");
+        sb.append("# Project Briefing (generated ").append(LocalDate.now()).append(")\n");
         sb.append("Tier: ").append(tier != null ? tier : "unknown");
         sb.append(" | ").append(allNodes.size()).append(" nodes");
         sb.append(" | ").append(edgeCount).append(" edges");
@@ -1713,34 +1713,34 @@ public class CodexGenerator {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd code-navigator && ./gradlew test --tests "com.codenavigator.codex.CodexGeneratorTest" -q`
+Run: `cd code-navigator && ./gradlew test --tests "com.codenavigator.briefing.BriefingGeneratorTest" -q`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd code-navigator && git add src/main/java/com/codenavigator/codex/CodexGenerator.java src/test/java/com/codenavigator/codex/CodexGeneratorTest.java
-git commit -m "feat(code-navigator): add CodexGenerator for compact index generation"
+cd code-navigator && git add src/main/java/com/codenavigator/briefing/BriefingGenerator.java src/test/java/com/codenavigator/briefing/BriefingGeneratorTest.java
+git commit -m "feat(code-navigator): add BriefingGenerator for compact index generation"
 ```
 
 ---
 
-## Task 10: Codex CLI Command + MCP Tool
+## Task 10: Briefing CLI Command + MCP Tool
 
 **Files:**
-- Create: `code-navigator/src/main/java/com/codenavigator/cli/CodexCommand.java`
+- Create: `code-navigator/src/main/java/com/codenavigator/cli/BriefingCommand.java`
 - Modify: `code-navigator/src/main/java/com/codenavigator/CodeNavigatorApplication.java`
 - Modify: `code-navigator/src/main/java/com/codenavigator/mcp/CodeNavigatorMcpServer.java`
 
-- [ ] **Step 1: Create CodexCommand**
+- [ ] **Step 1: Create BriefingCommand**
 
-Create `code-navigator/src/main/java/com/codenavigator/cli/CodexCommand.java`:
+Create `code-navigator/src/main/java/com/codenavigator/cli/BriefingCommand.java`:
 
 ```java
 package com.codenavigator.cli;
 
-import com.codenavigator.codex.CodexGenerator;
-import com.codenavigator.codex.DomainDbReader;
+import com.codenavigator.briefing.BriefingGenerator;
+import com.codenavigator.briefing.DomainDbReader;
 import com.codenavigator.graph.GraphStore;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
@@ -1748,13 +1748,13 @@ import picocli.CommandLine.Parameters;
 
 import java.nio.file.Path;
 
-@Command(name = "codex", description = "Generate compact codebase index for AI assistants")
-public class CodexCommand implements Runnable {
+@Command(name = "briefing", description = "Generate compact codebase index for AI assistants")
+public class BriefingCommand implements Runnable {
 
     @Parameters(index = "0", description = "Path to the project root")
     private Path projectPath;
 
-    @Option(names = "--output", description = "Output directory (default: .ai-codex)", defaultValue = ".ai-codex")
+    @Option(names = "--output", description = "Output directory (default: .ai-briefing)", defaultValue = ".ai-briefing")
     private String output;
 
     @Override
@@ -1772,11 +1772,11 @@ public class CodexCommand implements Runnable {
                 domainReader = new DomainDbReader(ProjectPaths.domainDb(projectPath));
             }
 
-            var generator = new CodexGenerator(store, domainReader);
+            var generator = new BriefingGenerator(store, domainReader);
             generator.generate(outputDir);
-            System.out.println("Codex generated at " + outputDir);
+            System.out.println("Briefing generated at " + outputDir);
         } catch (Exception e) {
-            System.err.println("Codex generation failed: " + e.getMessage());
+            System.err.println("Briefing generation failed: " + e.getMessage());
         } finally {
             if (domainReader != null) domainReader.close();
         }
@@ -1786,7 +1786,7 @@ public class CodexCommand implements Runnable {
 
 - [ ] **Step 2: Register in application + MCP server**
 
-In `CodeNavigatorApplication.java`, add `CodexCommand.class` to subcommands:
+In `CodeNavigatorApplication.java`, add `BriefingCommand.class` to subcommands:
 
 ```java
 subcommands = {
@@ -1798,31 +1798,31 @@ subcommands = {
     SyncIfDirtyCommand.class,
     InstallCommand.class,
     ExportCommand.class,
-    CodexCommand.class
+    BriefingCommand.class
 }
 ```
 
-In `CodeNavigatorMcpServer.java`, add the `cg_codex` tool registration and handler:
+In `CodeNavigatorMcpServer.java`, add the `cg_briefing` tool registration and handler:
 
 ```java
 .toolCall(
     Tool.builder()
-        .name("cg_codex")
-        .description("Generate compact codebase index files (.ai-codex/) for AI assistants. Reads both code graph and domain knowledge.")
+        .name("cg_briefing")
+        .description("Generate compact codebase index files (.ai-briefing/) for AI assistants. Reads both code graph and domain knowledge.")
         .inputSchema(jsonSchema(
-            withProjectPath(Map.of("output", propString("Output directory (default: .ai-codex)"))),
+            withProjectPath(Map.of("output", propString("Output directory (default: .ai-briefing)"))),
             List.of()))
         .build(),
-    (exchange, request) -> textResult(handleCgCodex(request.arguments()))
+    (exchange, request) -> textResult(handleCgBriefing(request.arguments()))
 )
 ```
 
 Handler:
 
 ```java
-String handleCgCodex(Map<String, Object> args) {
+String handleCgBriefing(Map<String, Object> args) {
     String projectPath = args.containsKey("projectPath") ? (String) args.get("projectPath") : null;
-    String outputName = args.containsKey("output") ? (String) args.get("output") : ".ai-codex";
+    String outputName = args.containsKey("output") ? (String) args.get("output") : ".ai-briefing";
 
     var root = projectPath != null ? java.nio.file.Path.of(projectPath)
         : java.nio.file.Path.of(System.getenv("CODE_NAVIGATOR_PROJECT") != null
@@ -1834,11 +1834,11 @@ String handleCgCodex(Map<String, Object> args) {
         if (ProjectPaths.hasDomainIndex(root)) {
             domainReader = new DomainDbReader(ProjectPaths.domainDb(root));
         }
-        var generator = new CodexGenerator(store, domainReader);
+        var generator = new BriefingGenerator(store, domainReader);
         generator.generate(outputDir);
-        return "Codex generated at " + outputDir.toAbsolutePath();
+        return "Briefing generated at " + outputDir.toAbsolutePath();
     } catch (Exception e) {
-        return "Codex generation failed: " + e.getMessage();
+        return "Briefing generation failed: " + e.getMessage();
     } finally {
         if (domainReader != null) domainReader.close();
     }
@@ -1848,8 +1848,8 @@ String handleCgCodex(Map<String, Object> args) {
 Add the import at the top of `CodeNavigatorMcpServer.java`:
 
 ```java
-import com.codenavigator.codex.CodexGenerator;
-import com.codenavigator.codex.DomainDbReader;
+import com.codenavigator.briefing.BriefingGenerator;
+import com.codenavigator.briefing.DomainDbReader;
 ```
 
 - [ ] **Step 3: Run all tests**
@@ -1860,8 +1860,8 @@ Expected: All tests PASS
 - [ ] **Step 4: Commit**
 
 ```bash
-cd code-navigator && git add src/main/java/com/codenavigator/cli/CodexCommand.java src/main/java/com/codenavigator/CodeNavigatorApplication.java src/main/java/com/codenavigator/mcp/CodeNavigatorMcpServer.java
-git commit -m "feat(code-navigator): add codex CLI command and cg_codex MCP tool"
+cd code-navigator && git add src/main/java/com/codenavigator/cli/BriefingCommand.java src/main/java/com/codenavigator/CodeNavigatorApplication.java src/main/java/com/codenavigator/mcp/CodeNavigatorMcpServer.java
+git commit -m "feat(code-navigator): add briefing CLI command and cg_briefing MCP tool"
 ```
 
 ---
@@ -1913,7 +1913,7 @@ Expected: `build/libs/code-navigator-0.1.0.jar` produced
 - [ ] **Step 3: Smoke test CLI commands**
 
 Run: `java -jar code-navigator/build/libs/code-navigator-0.1.0.jar --help`
-Expected: Output lists `codex`, `export` alongside existing commands
+Expected: Output lists `briefing`, `export` alongside existing commands
 
 - [ ] **Step 4: Commit plan**
 
