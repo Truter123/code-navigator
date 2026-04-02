@@ -78,4 +78,17 @@ class DashboardApiTest {
             assertThat(response.body().string()).isEqualTo("{}");
         });
     }
+
+    @Test
+    void listAgents_returnsNameField() {
+        store.logAudit("test-agent", "store", "k1", null, 5.0);
+
+        JavalinTest.test(app, (server, client) -> {
+            var response = client.get("/api/agents");
+            assertThat(response.code()).isEqualTo(200);
+            var body = response.body().string();
+            assertThat(body).contains("\"name\"");
+            assertThat(body).contains("test-agent");
+        });
+    }
 }
