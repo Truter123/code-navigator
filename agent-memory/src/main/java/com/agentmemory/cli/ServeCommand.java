@@ -5,12 +5,16 @@ import com.agentmemory.brain.BrainEngine;
 import com.agentmemory.mcp.AgentMemoryMcpServer;
 import com.agentmemory.store.GraphStore;
 import com.agentmemory.store.MemoryStore;
+import com.agentmemory.ws.EventBus;
+import com.agentmemory.ws.WebSocketHandler;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.javalin.Javalin;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Set;
 
 @Command(name = "serve", description = "Start MCP server and dashboard")
 public class ServeCommand implements Runnable {
@@ -18,7 +22,7 @@ public class ServeCommand implements Runnable {
     @Option(names = {"--port", "-p"}, description = "Dashboard HTTP port (default: 7070)", defaultValue = "7070")
     private int port;
 
-    @Option(names = {"--db"}, description = "Database path (default: ~/.agent-memory/memory.db)")
+    @Option(names = {"--db"}, description = "Database path (default: <project-dir>/memory.db)")
     private String dbPath;
 
     @Override
@@ -28,7 +32,11 @@ public class ServeCommand implements Runnable {
         if (dbPath != null) {
             db = Path.of(dbPath);
         } else {
-            db = Path.of(System.getProperty("user.home"), ".agent-memory", "memory.db");
+            try {
+                db = Path.of(ServeCommand.class.getProtectionDomain().getCodeSource().getLocation().toURI()).getParent().resolve("memory.db");
+            } catch (Exception e) {
+                db = Path.of("memory.db").toAbsolutePath();
+            }
         }
 
         // 2. Create directories, init stores
@@ -43,14 +51,25 @@ public class ServeCommand implements Runnable {
         GraphStore graphStore = new GraphStore(memoryStore);
         BrainEngine brain = new BrainEngine(memoryStore, graphStore);
 
+        ObjectMapper objectMapper = new ObjectMapper();
+        String throttleSetting = memoryStore.getSetting("ws.throttle.ms");
+        long throttleMs = throttleSetting != null ? Long.parseLong(throttleSetting) : 0;
+        EventBus eventBus = new EventBus(objectMapper, throttleMs);
+
         // 3. Start Javalin on daemon thread
         DashboardApi dashboardApi = new DashboardApi(memoryStore, graphStore, brain);
 
         final int dashboardPort = port;
         Thread dashboardThread = new Thread(() -> {
+            WebSocketHandler wsHandler = new WebSocketHandler(
+                eventBus, objectMapper,
+                Set.of("audit", "memory", "anomaly", "agent", "goal", "graph")
+            );
+
             Javalin app = Javalin.create(config -> {
-                config.staticFiles.add("/static");
+                config.staticFiles.add("/static/browser");
                 config.startup.showJavalinBanner = false;
+                config.spaRoot.addFile("/", "/static/browser/index.html", io.javalin.http.staticfiles.Location.CLASSPATH);
 
                 // CORS headers
                 config.routes.before(ctx -> {
@@ -64,20 +83,8 @@ public class ServeCommand implements Runnable {
                 // Register API routes
                 dashboardApi.register(config.routes);
 
-                // SPA fallback: serve index.html for non-API paths
-                config.routes.error(404, ctx -> {
-                    if (!ctx.path().startsWith("/api/")) {
-                        ctx.result("""
-                            <!DOCTYPE html>
-                            <html><body>
-                            <h1>Agent Memory Dashboard</h1>
-                            <p>Dashboard UI not yet built. API available at /api/*</p>
-                            </body></html>
-                        """);
-                        ctx.contentType("text/html");
-                        ctx.status(200);
-                    }
-                });
+                // Register WebSocket routes
+                wsHandler.register(config.routes);
             });
 
             app.start(dashboardPort);
@@ -88,7 +95,7 @@ public class ServeCommand implements Runnable {
 
         // 4. Start MCP server on main thread (blocks)
         System.err.println("agent-memory MCP server starting (db: " + db + ")...");
-        AgentMemoryMcpServer mcpServer = new AgentMemoryMcpServer(memoryStore, graphStore, brain);
+        AgentMemoryMcpServer mcpServer = new AgentMemoryMcpServer(memoryStore, graphStore, brain, eventBus);
         mcpServer.start();
     }
 }

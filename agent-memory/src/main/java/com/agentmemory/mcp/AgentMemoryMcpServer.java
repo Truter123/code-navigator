@@ -2,6 +2,7 @@ package com.agentmemory.mcp;
 
 import com.agentmemory.brain.BrainEngine;
 import com.agentmemory.model.*;
+import com.agentmemory.ws.EventBus;
 import com.agentmemory.store.GraphStore;
 import com.agentmemory.store.MemoryStore;
 import tools.jackson.databind.json.JsonMapper;
@@ -22,11 +23,13 @@ public class AgentMemoryMcpServer {
     private final MemoryStore memoryStore;
     private final GraphStore graphStore;
     private final BrainEngine brain;
+    private final EventBus eventBus;
 
-    public AgentMemoryMcpServer(MemoryStore memoryStore, GraphStore graphStore, BrainEngine brain) {
+    public AgentMemoryMcpServer(MemoryStore memoryStore, GraphStore graphStore, BrainEngine brain, EventBus eventBus) {
         this.memoryStore = memoryStore;
         this.graphStore = graphStore;
         this.brain = brain;
+        this.eventBus = eventBus;
     }
 
     public void start() {
@@ -204,8 +207,17 @@ public class AgentMemoryMcpServer {
         boolean shared = toBoolean(args.get("shared"), false);
 
         memoryStore.upsert(key, value, agent, project, tags, importance, shared);
+        if (eventBus != null) {
+            eventBus.publish("memory", Map.of("action", "store", "key", key, "agent", agent, "project", project != null ? project : ""));
+            eventBus.publish("agent", Map.of("name", agent, "status", "active", "event", "operation"));
+        }
 
         List<Anomaly> anomalies = brain.onStore(key, value, agent, project);
+        if (eventBus != null && !anomalies.isEmpty()) {
+            for (Anomaly a : anomalies) {
+                eventBus.publish("anomaly", a);
+            }
+        }
 
         StringBuilder sb = new StringBuilder();
         sb.append("Stored memory: ").append(key).append("\n");
@@ -257,6 +269,9 @@ public class AgentMemoryMcpServer {
         String agent = (String) args.get("agent");
 
         memoryStore.softDeleteByKeyAndAgent(key, agent);
+        if (eventBus != null) {
+            eventBus.publish("memory", Map.of("action", "delete", "key", key, "agent", agent));
+        }
         return "Soft-deleted memory: " + key + " (agent: " + agent + ")";
     }
 
@@ -309,6 +324,9 @@ public class AgentMemoryMcpServer {
         String agent = (String) args.get("agent");
 
         memoryStore.share(key, agent, null);
+        if (eventBus != null) {
+            eventBus.publish("memory", Map.of("action", "share", "key", key, "agent", agent));
+        }
         return "Memory '" + key + "' is now shared (agent: " + agent + ")";
     }
 
@@ -328,6 +346,9 @@ public class AgentMemoryMcpServer {
         String project = (String) args.get("project");
 
         memoryStore.setGoals(agent, goals, project);
+        if (eventBus != null) {
+            eventBus.publish("goal", Map.of("agent", agent, "goals", goals, "action", "registered"));
+        }
 
         StringBuilder sb = new StringBuilder();
         sb.append("Registered ").append(goals.size()).append(" goals for agent '").append(agent).append("':\n");
@@ -342,6 +363,11 @@ public class AgentMemoryMcpServer {
         String project = (String) args.get("project");
 
         List<Anomaly> anomalies = brain.check(agent, project);
+        if (eventBus != null && !anomalies.isEmpty()) {
+            for (Anomaly a : anomalies) {
+                eventBus.publish("anomaly", a);
+            }
+        }
 
         if (anomalies.isEmpty()) return "No anomalies detected for agent '" + agent + "'.";
 
@@ -365,6 +391,9 @@ public class AgentMemoryMcpServer {
         String agent = (String) args.get("agent");
 
         graphStore.link(sourceKey, targetKey, relation, agent);
+        if (eventBus != null) {
+            eventBus.publish("graph", Map.of("source", sourceKey, "target", targetKey, "relation", relation));
+        }
         return "Linked '" + sourceKey + "' --[" + relation + "]--> '" + targetKey + "'";
     }
 
@@ -399,6 +428,17 @@ public class AgentMemoryMcpServer {
         String agent = (String) args.getOrDefault("agent", "unknown");
         String key = (String) args.get("key");
         memoryStore.logAudit(agent, operation, key, null, latencyMs);
+
+        // Publish audit event
+        if (eventBus != null) {
+            eventBus.publish("audit", Map.of(
+                "agent", agent,
+                "operation", operation,
+                "key", key != null ? key : "",
+                "latencyMs", latencyMs
+            ));
+        }
+
         return textResult(result);
     }
 
