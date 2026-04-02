@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "java -jar /home/kamil/Documents/Project/My/Mcp/code-navigator/code-navigator.run mark-dirty",
+            "command": "java -jar /home/kamil/Documents/Project/My/Mcp/jars/code-navigator.jar mark-dirty",
             "async": true
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "java -jar /home/kamil/Documents/Project/My/Mcp/code-navigator/code-navigator.run sync-if-dirty"
+            "command": "java -jar /home/kamil/Documents/Project/My/Mcp/jars/code-navigator.jar sync-if-dirty"
           }
         ]
       }
