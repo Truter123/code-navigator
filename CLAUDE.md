@@ -18,7 +18,7 @@ cd agent-memory && ./gradlew shadowJar
 
 ## Project Structure
 
-- `code-navigator/` — Code navigator MCP server. Indexes Java codebases into a SQLite-backed graph (nodes: controllers, commands, handlers, aggregates, events, projections; edges: calls, handles, emits, etc.). 11 MCP tools for navigation and impact analysis.
+- `code-navigator/` — Code navigator MCP server. Indexes Java codebases into a SQLite-backed graph (nodes: controllers, commands, handlers, aggregates, events, projections; edges: calls, handles, emits, etc.). 15 MCP tools for navigation, impact analysis, dead code detection, hotspot analysis, package dependencies, export, and compact index generation.
 - `domain-navigator/` — Domain knowledge MCP server. Extracts and serves business domain concepts (bounded contexts, entities, glossary, flows, rules) from code-navigator data. 6 MCP tools.
 - `agent-memory/` — Agent memory MCP server. General-purpose persistent memory engine for AI agents with knowledge graph, brain system (loop/drift/contradiction detection), and Angular 19 dashboard. 12 MCP tools prefixed `mem_*`. Dashboard at `http://localhost:7070`.
 - `jars/` — Pre-built JARs and runner scripts for all servers.
@@ -28,7 +28,6 @@ cd agent-memory && ./gradlew shadowJar
 - **code-navigator** — defined in `code-navigator/.mcp.json`, tools prefixed `cg_*`
 - **domain-navigator** — configured externally, tools prefixed `dm_*`
 - **agent-memory** — configured externally, tools prefixed `mem_*`
-- **my-mcp** — configured externally, provides `activity_today`, `kb_list`, `activity_repos`
 
 ## Key Dependencies
 
@@ -44,5 +43,5 @@ cd agent-memory && ./gradlew shadowJar
 - All projects use the Shadow Gradle plugin to produce fat JARs
 - Version for all: `0.1.0`
 - code-navigator and domain-navigator store data in `navigators/` inside indexed projects
-- agent-memory stores data globally at `~/.agent-memory/memory.db`
+- agent-memory stores data next to the JAR (e.g. `agent-memory/memory.db`)
 - domain-navigator uses `DOMAIN_NAVIGATOR_PROJECT` env var to specify which projects to serve
