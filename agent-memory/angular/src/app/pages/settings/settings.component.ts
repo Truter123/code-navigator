@@ -22,6 +22,15 @@ import { ApiService } from '../../services/api.service';
         <label class="form-label">Drift Threshold</label>
         <input class="form-input" type="number" step="0.01" [(ngModel)]="settings.driftThreshold">
       </div>
+      <h2 class="section-title" style="margin-top: 24px;">WebSocket</h2>
+      <div class="form-group">
+        <label class="form-label">Throttle Interval (ms, 0 = immediate)</label>
+        <input class="form-input" type="number" [(ngModel)]="settings.wsThrottleMs">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Default Topics (* = all)</label>
+        <input class="form-input" type="text" [(ngModel)]="settings.wsDefaultTopics">
+      </div>
       <button class="btn-save" (click)="save()">Save Settings</button>
       @if (saved) {
         <span class="save-confirm">Settings saved successfully</span>
@@ -49,7 +58,7 @@ import { ApiService } from '../../services/api.service';
   `]
 })
 export class SettingsComponent implements OnInit {
-  settings: any = { loopWindowSeconds: 60, loopThreshold: 5, driftThreshold: 0.3 };
+  settings: any = { loopWindowSeconds: 60, loopThreshold: 5, driftThreshold: 0.3, wsThrottleMs: 0, wsDefaultTopics: '*' };
   saved = false;
 
   constructor(private api: ApiService) {}

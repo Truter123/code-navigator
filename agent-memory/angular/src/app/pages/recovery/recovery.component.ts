@@ -1,6 +1,8 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, OnDestroy } from '@angular/core';
 import { DatePipe } from '@angular/common';
 import { ApiService } from '../../services/api.service';
+import { WebSocketService } from '../../services/ws.service';
+import { Subscription } from 'rxjs';
 
 @Component({
   selector: 'app-recovery',
@@ -46,10 +48,11 @@ import { ApiService } from '../../services/api.service';
     .empty { color: var(--text-secondary); font-size: 13px; grid-column: 1 / -1; }
   `]
 })
-export class RecoveryComponent implements OnInit {
+export class RecoveryComponent implements OnInit, OnDestroy {
   agents: any[] = [];
+  private subs: Subscription[] = [];
 
-  constructor(private api: ApiService) {}
+  constructor(private api: ApiService, private ws: WebSocketService) {}
 
   ngOnInit() {
     this.api.getAgents().subscribe(agents => {
@@ -60,7 +63,21 @@ export class RecoveryComponent implements OnInit {
         });
       });
     });
+    this.subs.push(
+      this.ws.on('agent').subscribe(() => {
+        this.api.getAgents().subscribe(agents => {
+          this.agents = agents;
+          this.agents.forEach(a => {
+            this.api.getAgentMetrics(a.name).subscribe(m => {
+              a.totalOps = (m.totalWrites || 0) + (m.totalReads || 0);
+            });
+          });
+        });
+      })
+    );
   }
+
+  ngOnDestroy() { this.subs.forEach(s => s.unsubscribe()); }
 
   getStatus(agent: any): string {
     if (!agent.lastSeen) return 'Inactive';

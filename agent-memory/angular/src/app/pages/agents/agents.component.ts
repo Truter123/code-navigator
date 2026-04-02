@@ -1,6 +1,8 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, OnDestroy } from '@angular/core';
 import { DecimalPipe } from '@angular/common';
 import { ApiService } from '../../services/api.service';
+import { WebSocketService } from '../../services/ws.service';
+import { Subscription } from 'rxjs';
 
 @Component({
   selector: 'app-agents',
@@ -52,10 +54,11 @@ import { ApiService } from '../../services/api.service';
     .empty { color: var(--text-secondary); font-size: 13px; padding: 24px 16px; }
   `]
 })
-export class AgentsComponent implements OnInit {
+export class AgentsComponent implements OnInit, OnDestroy {
   agents: any[] = [];
+  private subs: Subscription[] = [];
 
-  constructor(private api: ApiService) {}
+  constructor(private api: ApiService, private ws: WebSocketService) {}
 
   ngOnInit() {
     this.api.getAgents().subscribe(agents => {
@@ -64,5 +67,19 @@ export class AgentsComponent implements OnInit {
         this.api.getAgentMetrics(a.name).subscribe(m => Object.assign(a, m));
       });
     });
+    this.subs.push(
+      this.ws.on('audit').subscribe(e => {
+        const agent = this.agents.find(a => a.name === e.data.agent);
+        if (agent) {
+          if (['store','delete','link','share','goals'].includes(e.data.operation)) {
+            agent.totalWrites = (agent.totalWrites || 0) + 1;
+          } else {
+            agent.totalReads = (agent.totalReads || 0) + 1;
+          }
+        }
+      })
+    );
   }
+
+  ngOnDestroy() { this.subs.forEach(s => s.unsubscribe()); }
 }

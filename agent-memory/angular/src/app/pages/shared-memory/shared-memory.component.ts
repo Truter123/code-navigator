@@ -1,7 +1,9 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, OnDestroy } from '@angular/core';
 import { DatePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../../services/api.service';
+import { WebSocketService } from '../../services/ws.service';
+import { Subscription } from 'rxjs';
 
 @Component({
   selector: 'app-shared-memory',
@@ -80,21 +82,32 @@ import { ApiService } from '../../services/api.service';
     .empty { color: var(--text-secondary); font-size: 13px; padding: 24px 0; text-align: center; }
   `]
 })
-export class SharedMemoryComponent implements OnInit {
+export class SharedMemoryComponent implements OnInit, OnDestroy {
   memories: any[] = [];
   filteredMemories: any[] = [];
   searchQuery = '';
   selectedMemory: any = null;
   versions: any[] = [];
+  private subs: Subscription[] = [];
 
-  constructor(private api: ApiService) {}
+  constructor(private api: ApiService, private ws: WebSocketService) {}
 
   ngOnInit() {
     this.api.getMemories({ shared: true }).subscribe(m => {
       this.memories = m;
       this.filterMemories();
     });
+    this.subs.push(
+      this.ws.on('memory').subscribe(() => {
+        this.api.getMemories({ shared: true }).subscribe(m => {
+          this.memories = m;
+          this.filterMemories();
+        });
+      })
+    );
   }
+
+  ngOnDestroy() { this.subs.forEach(s => s.unsubscribe()); }
 
   filterMemories() {
     this.filteredMemories = this.memories.filter(m =>

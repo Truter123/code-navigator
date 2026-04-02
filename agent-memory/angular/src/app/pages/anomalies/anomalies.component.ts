@@ -1,5 +1,7 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, OnDestroy } from '@angular/core';
 import { ApiService } from '../../services/api.service';
+import { WebSocketService } from '../../services/ws.service';
+import { Subscription } from 'rxjs';
 
 @Component({
   selector: 'app-anomalies',
@@ -54,12 +56,20 @@ import { ApiService } from '../../services/api.service';
     .key-tag { background: rgba(249,115,22,0.2); color: var(--accent); padding: 2px 8px; border-radius: 4px; font-size: 11px; }
   `]
 })
-export class AnomaliesComponent implements OnInit {
+export class AnomaliesComponent implements OnInit, OnDestroy {
   anomalies: any[] = [];
+  private subs: Subscription[] = [];
 
-  constructor(private api: ApiService) {}
+  constructor(private api: ApiService, private ws: WebSocketService) {}
 
   ngOnInit() {
     this.api.getAnomalies().subscribe(a => this.anomalies = a);
+    this.subs.push(
+      this.ws.on('anomaly').subscribe(e => {
+        this.anomalies.unshift(e.data);
+      })
+    );
   }
+
+  ngOnDestroy() { this.subs.forEach(s => s.unsubscribe()); }
 }

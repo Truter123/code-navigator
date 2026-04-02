@@ -1,6 +1,8 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, OnDestroy } from '@angular/core';
 import { DatePipe, DecimalPipe } from '@angular/common';
 import { ApiService } from '../../services/api.service';
+import { WebSocketService } from '../../services/ws.service';
+import { Subscription } from 'rxjs';
 
 @Component({
   selector: 'app-performance',
@@ -71,14 +73,29 @@ import { ApiService } from '../../services/api.service';
     .empty { color: var(--text-secondary); font-size: 13px; padding: 24px 16px; }
   `]
 })
-export class PerformanceComponent implements OnInit {
+export class PerformanceComponent implements OnInit, OnDestroy {
   summary: any = { avgLatency: 0, totalOps: 0, totalWrites: 0, totalReads: 0 };
   timeseries: any[] = [];
+  private subs: Subscription[] = [];
 
-  constructor(private api: ApiService) {}
+  constructor(private api: ApiService, private ws: WebSocketService) {}
 
   ngOnInit() {
     this.api.getPerformanceSummary().subscribe(s => this.summary = s);
     this.api.getTimeseries({ limit: 20 }).subscribe(t => this.timeseries = t);
+    this.subs.push(
+      this.ws.on('audit').subscribe(e => {
+        this.timeseries.unshift(e.data);
+        if (this.timeseries.length > 20) this.timeseries.pop();
+        this.summary.totalOps = (this.summary.totalOps || 0) + 1;
+        if (['store','delete','link','share','goals'].includes(e.data.operation)) {
+          this.summary.totalWrites = (this.summary.totalWrites || 0) + 1;
+        } else {
+          this.summary.totalReads = (this.summary.totalReads || 0) + 1;
+        }
+      })
+    );
   }
+
+  ngOnDestroy() { this.subs.forEach(s => s.unsubscribe()); }
 }

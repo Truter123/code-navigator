@@ -1,6 +1,8 @@
 import { Component, AfterViewInit, ElementRef, ViewChild, OnDestroy } from '@angular/core';
 import cytoscape from 'cytoscape';
 import { ApiService } from '../../services/api.service';
+import { WebSocketService } from '../../services/ws.service';
+import { Subscription } from 'rxjs';
 
 @Component({
   selector: 'app-knowledge-graph',
@@ -20,8 +22,9 @@ import { ApiService } from '../../services/api.service';
 export class KnowledgeGraphComponent implements AfterViewInit, OnDestroy {
   @ViewChild('graphContainer') containerRef!: ElementRef;
   private cy: cytoscape.Core | null = null;
+  private subs: Subscription[] = [];
 
-  constructor(private api: ApiService) {}
+  constructor(private api: ApiService, private ws: WebSocketService) {}
 
   ngAfterViewInit() {
     this.api.getGraph().subscribe(data => {
@@ -70,10 +73,27 @@ export class KnowledgeGraphComponent implements AfterViewInit, OnDestroy {
         ],
         layout: { name: 'cose', animate: false } as any,
       });
+      this.subs.push(
+        this.ws.on('graph').subscribe(e => {
+          if (this.cy) {
+            const src = String(e.data.source);
+            const tgt = String(e.data.target);
+            if (!this.cy.getElementById(src).length) {
+              this.cy.add({ data: { id: src, label: src } });
+            }
+            if (!this.cy.getElementById(tgt).length) {
+              this.cy.add({ data: { id: tgt, label: tgt } });
+            }
+            this.cy.add({ data: { source: src, target: tgt, label: e.data.relation || '' } });
+            this.cy.layout({ name: 'cose', animate: true } as any).run();
+          }
+        })
+      );
     });
   }
 
   ngOnDestroy() {
     this.cy?.destroy();
+    this.subs.forEach(s => s.unsubscribe());
   }
 }

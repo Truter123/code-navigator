@@ -1,6 +1,8 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, OnDestroy } from '@angular/core';
 import { DatePipe } from '@angular/common';
 import { ApiService } from '../../services/api.service';
+import { WebSocketService } from '../../services/ws.service';
+import { Subscription } from 'rxjs';
 
 @Component({
   selector: 'app-overview',
@@ -65,14 +67,15 @@ import { ApiService } from '../../services/api.service';
     .empty { color: var(--text-secondary); font-size: 13px; padding: 16px 0; }
   `]
 })
-export class OverviewComponent implements OnInit {
+export class OverviewComponent implements OnInit, OnDestroy {
   totalMemories = 0;
   activeAgents = 0;
   anomalyCount = 0;
   sharedMemories = 0;
   recentActivity: any[] = [];
+  private subs: Subscription[] = [];
 
-  constructor(private api: ApiService) {}
+  constructor(private api: ApiService, private ws: WebSocketService) {}
 
   ngOnInit() {
     this.api.getMemories().subscribe(m => {
@@ -82,5 +85,18 @@ export class OverviewComponent implements OnInit {
     this.api.getAgents().subscribe(a => this.activeAgents = a.length);
     this.api.getAnomalies().subscribe(a => this.anomalyCount = a.length);
     this.api.getAuditLog({ limit: 10 }).subscribe(a => this.recentActivity = a);
+    this.subs.push(
+      this.ws.on('memory').subscribe(e => {
+        if (e.data.action === 'store') this.totalMemories++;
+        if (e.data.action === 'delete') this.totalMemories = Math.max(0, this.totalMemories - 1);
+      }),
+      this.ws.on('anomaly').subscribe(() => this.anomalyCount++),
+      this.ws.on('audit').subscribe(e => {
+        this.recentActivity.unshift(e.data);
+        if (this.recentActivity.length > 10) this.recentActivity.pop();
+      })
+    );
   }
+
+  ngOnDestroy() { this.subs.forEach(s => s.unsubscribe()); }
 }

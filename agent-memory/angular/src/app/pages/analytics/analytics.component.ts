@@ -1,5 +1,7 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, OnDestroy } from '@angular/core';
 import { ApiService } from '../../services/api.service';
+import { WebSocketService } from '../../services/ws.service';
+import { Subscription } from 'rxjs';
 
 @Component({
   selector: 'app-analytics',
@@ -59,14 +61,15 @@ import { ApiService } from '../../services/api.service';
     .empty { color: var(--text-secondary); font-size: 13px; }
   `]
 })
-export class AnalyticsComponent implements OnInit {
+export class AnalyticsComponent implements OnInit, OnDestroy {
   agentStats: any[] = [];
   totalMemories = 0;
   sharedMemories = 0;
   totalAgents = 0;
   totalAnomalies = 0;
+  private subs: Subscription[] = [];
 
-  constructor(private api: ApiService) {}
+  constructor(private api: ApiService, private ws: WebSocketService) {}
 
   ngOnInit() {
     this.api.getAgents().subscribe(agents => {
@@ -94,5 +97,38 @@ export class AnalyticsComponent implements OnInit {
       this.sharedMemories = m.filter((x: any) => x.shared).length;
     });
     this.api.getAnomalies().subscribe(a => this.totalAnomalies = a.length);
+    this.subs.push(
+      this.ws.on('audit').subscribe(() => {
+        this.api.getAgents().subscribe(agents => {
+          this.totalAgents = agents.length;
+          let maxOps = 0;
+          const stats: any[] = [];
+          let pending = agents.length;
+          if (pending === 0) return;
+          agents.forEach(a => {
+            this.api.getAgentMetrics(a.name).subscribe(m => {
+              const totalOps = (m.totalWrites || 0) + (m.totalReads || 0);
+              stats.push({ name: a.name, totalOps });
+              if (totalOps > maxOps) maxOps = totalOps;
+              pending--;
+              if (pending === 0) {
+                this.agentStats = stats
+                  .sort((a, b) => b.totalOps - a.totalOps)
+                  .map(s => ({ ...s, pct: maxOps > 0 ? (s.totalOps / maxOps) * 100 : 0 }));
+              }
+            });
+          });
+        });
+      }),
+      this.ws.on('memory').subscribe(() => {
+        this.api.getMemories().subscribe(m => {
+          this.totalMemories = m.length;
+          this.sharedMemories = m.filter((x: any) => x.shared).length;
+        });
+      }),
+      this.ws.on('anomaly').subscribe(() => this.totalAnomalies++)
+    );
   }
+
+  ngOnDestroy() { this.subs.forEach(s => s.unsubscribe()); }
 }

@@ -1,7 +1,9 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, OnDestroy } from '@angular/core';
 import { DatePipe, DecimalPipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../../services/api.service';
+import { WebSocketService } from '../../services/ws.service';
+import { Subscription } from 'rxjs';
 
 @Component({
   selector: 'app-audit-trail',
@@ -80,20 +82,31 @@ import { ApiService } from '../../services/api.service';
     .empty { color: var(--text-secondary); font-size: 13px; padding: 24px 16px; }
   `]
 })
-export class AuditTrailComponent implements OnInit {
+export class AuditTrailComponent implements OnInit, OnDestroy {
   auditLog: any[] = [];
   agents: any[] = [];
   filterAgent = '';
   filterOperation = '';
   page = 0;
   pageSize = 20;
+  private subs: Subscription[] = [];
 
-  constructor(private api: ApiService) {}
+  constructor(private api: ApiService, private ws: WebSocketService) {}
 
   ngOnInit() {
     this.api.getAgents().subscribe(a => this.agents = a);
     this.loadAudit();
+    this.subs.push(
+      this.ws.on('audit').subscribe(e => {
+        if (this.page === 0) {
+          this.auditLog.unshift(e.data);
+          if (this.auditLog.length > this.pageSize) this.auditLog.pop();
+        }
+      })
+    );
   }
+
+  ngOnDestroy() { this.subs.forEach(s => s.unsubscribe()); }
 
   loadAudit() {
     const params: any = { limit: this.pageSize, offset: this.page * this.pageSize };

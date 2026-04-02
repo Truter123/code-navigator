@@ -1,7 +1,9 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, OnDestroy } from '@angular/core';
 import { DatePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../../services/api.service';
+import { WebSocketService } from '../../services/ws.service';
+import { Subscription } from 'rxjs';
 
 @Component({
   selector: 'app-memory-explorer',
@@ -91,7 +93,7 @@ import { ApiService } from '../../services/api.service';
     .empty { color: var(--text-secondary); font-size: 13px; padding: 24px 0; text-align: center; }
   `]
 })
-export class MemoryExplorerComponent implements OnInit {
+export class MemoryExplorerComponent implements OnInit, OnDestroy {
   memories: any[] = [];
   filteredMemories: any[] = [];
   agents: any[] = [];
@@ -99,13 +101,19 @@ export class MemoryExplorerComponent implements OnInit {
   searchQuery = '';
   selectedMemory: any = null;
   versions: any[] = [];
+  private subs: Subscription[] = [];
 
-  constructor(private api: ApiService) {}
+  constructor(private api: ApiService, private ws: WebSocketService) {}
 
   ngOnInit() {
     this.api.getAgents().subscribe(a => this.agents = a);
     this.loadMemories();
+    this.subs.push(
+      this.ws.on('memory').subscribe(() => this.loadMemories())
+    );
   }
+
+  ngOnDestroy() { this.subs.forEach(s => s.unsubscribe()); }
 
   loadMemories() {
     const params: any = {};
