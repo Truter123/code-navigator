@@ -14,14 +14,6 @@ cd "$MCP_DIR/code-navigator"
 cp build/libs/code-navigator-0.1.0.jar "$SCRIPT_DIR/code-navigator.jar"
 echo "  -> code-navigator.jar"
 
-# agent-memory
-echo ""
-echo "Building agent-memory..."
-cd "$MCP_DIR/agent-memory"
-./gradlew shadowJar -q
-cp build/libs/agent-memory-0.1.0.jar "$SCRIPT_DIR/agent-memory.jar"
-echo "  -> agent-memory.jar"
-
 echo ""
 echo "=== All JARs built ==="
 ls -lh "$SCRIPT_DIR"/*.jar

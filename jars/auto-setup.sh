@@ -1,7 +1,6 @@
 #!/bin/bash
 # Auto-setup MCP servers for the current project.
 # Intended as a Claude Code SessionStart hook.
-# - Always adds agent-memory
 # - Adds code-navigator if Java sources found + auto-indexes
 # - Adds Angular MCP for each angular.json found in subdirectories
 
@@ -9,7 +8,6 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 JAR="$SCRIPT_DIR/code-navigator.jar"
-MEMORY_JAR="$SCRIPT_DIR/agent-memory.jar"
 PROJECT="$(pwd)"
 DB="$PROJECT/navigators/code/code-navigator.db"
 MCP_JSON="$PROJECT/.mcp.json"
@@ -38,14 +36,6 @@ with open('$MCP_JSON', 'w') as f:
 " 2>/dev/null && echo "Added $name to .mcp.json" >&2
 }
 
-# --- Agent Memory (always) ---
-if [ -f "$MEMORY_JAR" ]; then
-  add_server "agent-memory" "{
-    \"command\": \"java\",
-    \"args\": [\"-jar\", \"$MEMORY_JAR\", \"serve\"]
-  }"
-fi
-
 # --- Code Navigator (Java projects) ---
 if [ -f "$JAR" ]; then
   if find "$PROJECT" -maxdepth 4 -name "*.java" -not -path "*/build/*" -not -path "*/.gradle/*" -not -path "*/node_modules/*" 2>/dev/null | head -1 | grep -q .; then
@@ -68,8 +58,7 @@ fi
 while IFS= read -r angular_json; do
   ng_dir=$(dirname "$angular_json")
 
-  # Skip if this is an internal/embedded UI (e.g. agent-memory dashboard)
-  # Heuristic: skip if angular dir is inside a Java project's src/main/resources
+  # Skip if this is an internal/embedded UI
   echo "$ng_dir" | grep -qE "(src/main/resources|/angular$)" && continue
 
   # Derive a server name from the directory
