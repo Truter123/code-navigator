@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "agent-memory": {
+      "command": "java",
+      "args": [
+        "-jar",
+        "/home/kamil/Documents/Project/My/Mcp/jars/agent-memory.jar",
+        "serve"
+      ]
+    }
+  }
+}

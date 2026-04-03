@@ -64,14 +64,18 @@ if [ -f "$JAR" ]; then
 fi
 
 # --- Angular MCP (Angular projects) ---
+# Only add for real app frontends, skip embedded/internal dashboards
 while IFS= read -r angular_json; do
   ng_dir=$(dirname "$angular_json")
+
+  # Skip if this is an internal/embedded UI (e.g. agent-memory dashboard)
+  # Heuristic: skip if angular dir is inside a Java project's src/main/resources
+  echo "$ng_dir" | grep -qE "(src/main/resources|/angular$)" && continue
+
   # Derive a server name from the directory
-  rel_path="${ng_dir#$PROJECT/}"
   if [ "$ng_dir" = "$PROJECT" ]; then
     server_name="angular"
   else
-    # Use directory name, e.g. "angular-woa-fe"
     server_name="angular-$(basename "$ng_dir")"
   fi
 
