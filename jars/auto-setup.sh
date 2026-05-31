@@ -1,7 +1,7 @@
 #!/bin/bash
 # Auto-setup MCP servers for the current project.
 # Intended as a Claude Code SessionStart hook.
-# - Adds code-navigator if Java sources found + auto-indexes
+# - Adds code-navigator for ALL projects (all file types) + auto-indexes
 # - Adds Angular MCP for each angular.json found in subdirectories
 
 set -e
@@ -36,20 +36,18 @@ with open('$MCP_JSON', 'w') as f:
 " 2>/dev/null && echo "Added $name to .mcp.json" >&2
 }
 
-# --- Code Navigator (Java projects) ---
+# --- Code Navigator (all projects, all file types) ---
 if [ -f "$JAR" ]; then
-  if find "$PROJECT" -maxdepth 4 -name "*.java" -not -path "*/build/*" -not -path "*/.gradle/*" -not -path "*/node_modules/*" 2>/dev/null | head -1 | grep -q .; then
-    add_server "code-navigator" "{
-      \"command\": \"java\",
-      \"args\": [\"-jar\", \"$JAR\", \"serve\"],
-      \"env\": {\"CODE_NAVIGATOR_PROJECT\": \"$PROJECT\"}
-    }"
+  add_server "code-navigator" "{
+    \"command\": \"java\",
+    \"args\": [\"-jar\", \"$JAR\", \"serve\"],
+    \"env\": {\"CODE_NAVIGATOR_PROJECT\": \"$PROJECT\"}
+  }"
 
-    # Auto-index if no index exists
-    if [ ! -f "$DB" ]; then
-      echo "Auto-indexing $PROJECT..." >&2
-      java -jar "$JAR" init "$PROJECT" >&2 2>&1 || true
-    fi
+  # Auto-index if no index exists
+  if [ ! -f "$DB" ]; then
+    echo "Auto-indexing $PROJECT..." >&2
+    java -jar "$JAR" init "$PROJECT" >&2 2>&1 || true
   fi
 fi
 

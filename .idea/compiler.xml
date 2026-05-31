@@ -8,10 +8,13 @@
           <entry name="$USER_HOME$/.gradle/caches/modules-2/files-2.1/info.picocli/picocli-codegen/4.7.6/c36d09aee9ded3685ceac45de8c1e02623158920/picocli-codegen-4.7.6.jar" />
           <entry name="$USER_HOME$/.gradle/caches/modules-2/files-2.1/info.picocli/picocli/4.7.6/77c2cb87814b6a03d431fc856024a9f8ff605ad4/picocli-4.7.6.jar" />
         </processorPath>
-        <module name="what-did.main" />
+        <module name="code-navigator.main" />
       </profile>
     </annotationProcessing>
     <bytecodeTargetLevel>
+      <module name="agent-memory" target="21" />
+      <module name="agent-memory.main" target="21" />
+      <module name="agent-memory.test" target="21" />
       <module name="claude-fx" target="21" />
       <module name="claude-fx.main" target="21" />
       <module name="claude-fx.test" target="21" />
@@ -26,6 +29,12 @@
       <module name="domain-mcp" target="21" />
       <module name="domain-mcp.main" target="21" />
       <module name="domain-mcp.test" target="21" />
+      <module name="domain-navigator" target="21" />
+      <module name="domain-navigator.main" target="21" />
+      <module name="domain-navigator.test" target="21" />
+      <module name="what-did" target="21" />
+      <module name="what-did.main" target="21" />
+      <module name="what-did.test" target="21" />
     </bytecodeTargetLevel>
   </component>
 </project>

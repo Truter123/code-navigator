@@ -4,7 +4,6 @@
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/Mcp.iml" filepath="$PROJECT_DIR$/.idea/Mcp.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/code-navigator.main.iml" filepath="$PROJECT_DIR$/.idea/modules/code-navigator.main.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/modules/domain-navigator.main.iml" filepath="$PROJECT_DIR$/.idea/modules/domain-navigator.main.iml" />
     </modules>
   </component>
 </project>
