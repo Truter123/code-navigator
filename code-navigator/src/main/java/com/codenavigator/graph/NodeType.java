@@ -1,0 +1,18 @@
+package com.codenavigator.graph;
+
+public enum NodeType {
+    // Tier 1: Generic Java
+    CLASS, INTERFACE, RECORD, ENUM,
+    CONTROLLER, SERVICE, REPOSITORY, ENTITY,
+    CONFIGURATION, MAPPER,
+    // Tier 2: Spring Boot
+    VIEW, EVENT_PUBLISHER,
+    // Tier 3: DDD/CQRS
+    COMMAND, COMMAND_HANDLER, QUERY, QUERY_HANDLER,
+    AGGREGATE, DOMAIN_EVENT, EVENT_APPLIER,
+    PROJECTION_HANDLER, EVENT_LISTENER,
+    // Frontend
+    FE_SERVICE, FE_COMPONENT, FE_MODEL,
+    // External
+    LIBRARY
+}

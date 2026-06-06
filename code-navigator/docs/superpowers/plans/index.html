@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>code-navigator · improvement plans</title>
+<style>
+  :root{
+    --bg:#0f1115; --bg2:#171a21; --bg3:#1e222b; --line:#2a2f3a;
+    --txt:#e6e9ef; --dim:#9aa3b2; --faint:#6b7282;
+    --o1:#22c55e; --o2:#38bdf8; --o3:#f59e0b; --o4:#a78bfa; --o5:#fb7185;
+    --blue:#38bdf8; --green:#22c55e; --red:#f87171; --orange:#fb923c;
+    --purple:#a78bfa; --teal:#2dd4bf; --slate:#94a3b8;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:radial-gradient(1200px 600px at 70% -10%,#1b2230,transparent),var(--bg);
+    color:var(--txt); font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased; padding-bottom:120px;
+  }
+  .wrap{max-width:880px; margin:0 auto; padding:24px 18px}
+  h1{font-size:26px; margin:6px 0 2px; letter-spacing:-.5px}
+  .sub{color:var(--dim); margin:0 0 18px; font-size:14px}
+  .sub code{background:var(--bg3); padding:1px 6px; border-radius:6px; color:#cbd5e1}
+
+  /* overall progress */
+  .overall{
+    display:flex; align-items:center; gap:16px; background:var(--bg2);
+    border:1px solid var(--line); border-radius:16px; padding:16px 18px; margin-bottom:14px;
+  }
+  .ring{--p:0; width:64px; height:64px; flex:none; border-radius:50%;
+    background:conic-gradient(var(--green) calc(var(--p)*1%),#272c37 0);
+    display:grid; place-items:center; transition:--p .5s;}
+  .ring::after{content:attr(data-pct); width:50px; height:50px; border-radius:50%;
+    background:var(--bg2); display:grid; place-items:center; font-weight:700; font-size:15px;}
+  .overall .meta{flex:1}
+  .overall .meta b{font-size:16px}
+  .overall .bartrack{height:8px; background:#272c37; border-radius:99px; margin-top:8px; overflow:hidden}
+  .overall .barfill{height:100%; width:0; background:linear-gradient(90deg,var(--blue),var(--green)); border-radius:99px; transition:width .5s}
+  .btn{background:var(--bg3); color:var(--dim); border:1px solid var(--line); border-radius:10px;
+    padding:8px 12px; font-size:13px; cursor:pointer; white-space:nowrap}
+  .btn:hover{color:var(--txt); border-color:#3a4150}
+
+  /* next-step banner */
+  .next{
+    position:sticky; top:10px; z-index:30; margin:14px 0 22px;
+    background:linear-gradient(90deg,#10233a,#1a1430); border:1px solid #34507a;
+    border-radius:14px; padding:12px 16px; display:flex; align-items:center; gap:12px;
+    box-shadow:0 8px 30px rgba(0,0,0,.35);
+  }
+  .next .lab{font-size:11px; text-transform:uppercase; letter-spacing:1.5px; color:#7dd3fc; font-weight:700}
+  .next .what{flex:1; font-size:14px}
+  .next .what .path{color:var(--dim); font-size:12px}
+  .next.done{background:linear-gradient(90deg,#0f2a18,#102415); border-color:#2f6b41}
+  .next.done .lab{color:#86efac}
+
+  /* plan card */
+  .card{background:var(--bg2); border:1px solid var(--line); border-left-width:5px;
+    border-radius:14px; margin:12px 0; overflow:hidden; transition:border-color .2s}
+  .card[data-o="1"]{border-left-color:var(--o1)} .card[data-o="2"]{border-left-color:var(--o2)}
+  .card[data-o="3"]{border-left-color:var(--o3)} .card[data-o="4"]{border-left-color:var(--o4)}
+  .card[data-o="5"]{border-left-color:var(--o5)}
+  .phead{display:flex; align-items:center; gap:14px; padding:16px 18px; cursor:pointer; user-select:none}
+  .phead:hover{background:#1b1f28}
+  .emoji{font-size:26px; flex:none}
+  .ordno{font-size:11px; color:var(--faint); font-weight:700; letter-spacing:1px}
+  .ptitle{flex:1}
+  .ptitle h2{margin:0; font-size:17px; letter-spacing:-.3px}
+  .ptitle .goal{margin:3px 0 0; color:var(--dim); font-size:13px}
+  .pmini{flex:none; text-align:right; min-width:92px}
+  .pmini .pct{font-weight:700; font-size:15px}
+  .pmini .cnt{color:var(--faint); font-size:11px}
+  .pbar{height:6px; background:#272c37; border-radius:99px; margin-top:5px; overflow:hidden; width:92px}
+  .pbar i{display:block; height:100%; width:0; background:var(--green); border-radius:99px; transition:width .4s}
+  .chev{flex:none; color:var(--faint); transition:transform .25s; font-size:13px}
+  .card.open .chev{transform:rotate(90deg)}
+
+  .pbody{display:none; padding:0 18px 12px; border-top:1px solid var(--line)}
+  .card.open .pbody{display:block; animation:fade .25s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+  .arch{color:var(--dim); font-size:13px; background:var(--bg); border:1px solid var(--line);
+    border-radius:10px; padding:10px 12px; margin:14px 0}
+  .arch code{background:var(--bg3); padding:0 5px; border-radius:5px; color:#cbd5e1; font-size:12px}
+
+  /* task */
+  .task{border:1px solid var(--line); border-radius:11px; margin:9px 0; background:var(--bg3); overflow:hidden}
+  .thead{display:flex; align-items:center; gap:11px; padding:11px 13px; cursor:pointer; user-select:none}
+  .thead:hover{background:#232834}
+  .tnum{width:26px; height:26px; flex:none; border-radius:8px; background:#2b313d; color:var(--dim);
+    display:grid; place-items:center; font-size:12px; font-weight:700}
+  .task.done .tnum{background:var(--green); color:#06210f}
+  .thead .tt{flex:1; font-size:14px; font-weight:600}
+  .task.done .thead .tt{color:var(--dim); text-decoration:line-through; text-decoration-color:#3a4150}
+  .tprog{font-size:11px; color:var(--faint); flex:none}
+  .tchev{color:var(--faint); transition:transform .2s; font-size:11px; flex:none}
+  .task.open .tchev{transform:rotate(90deg)}
+  .tbody{display:none; padding:4px 13px 11px 13px}
+  .task.open .tbody{display:block}
+
+  /* step */
+  .step{display:flex; align-items:flex-start; gap:10px; padding:8px 8px; border-radius:9px; cursor:pointer}
+  .step:hover{background:#232834}
+  .step input{appearance:none; width:20px; height:20px; flex:none; margin-top:1px; border-radius:6px;
+    border:2px solid #404756; background:transparent; cursor:pointer; position:relative; transition:.15s}
+  .step input:checked{background:var(--green); border-color:var(--green)}
+  .step input:checked::after{content:"✓"; position:absolute; inset:0; display:grid; place-items:center;
+    color:#06210f; font-size:13px; font-weight:900}
+  .step .ico{flex:none; font-size:14px; width:20px; text-align:center; margin-top:1px}
+  .step .lab{flex:1; font-size:13.5px}
+  .step.checked .lab{color:var(--faint); text-decoration:line-through; text-decoration-color:#3a4150}
+  .tag{font-size:10px; padding:1px 6px; border-radius:6px; font-weight:700; vertical-align:middle; margin-left:6px}
+  .t-test{background:#0c2b46; color:#7dd3fc} .t-fail{background:#3a1518; color:#fca5a5}
+  .t-pass{background:#0f2a18; color:#86efac} .t-impl{background:#3a2410; color:#fdba74}
+  .t-commit{background:#0f2a18; color:#86efac} .t-build{background:#241540; color:#c4b5fd}
+  .t-reg{background:#0c2e2a; color:#5eead4} .t-fix{background:#2b2410; color:#fde68a}
+  .t-step{background:#262b35; color:#94a3b8}
+
+  .legend{display:flex; flex-wrap:wrap; gap:8px 14px; color:var(--dim); font-size:12px; margin:18px 2px 6px}
+  .legend span{display:inline-flex; align-items:center; gap:5px}
+  footer{color:var(--faint); font-size:12px; text-align:center; margin-top:26px}
+  .note{color:var(--faint); font-size:12px; margin:10px 2px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🧭 code-navigator — improvement plans</h1>
+  <p class="sub">Five TDD plans · click a card to open · tick steps as you go (saved in your browser) · suggested order shown as <b>①–⑤</b></p>
+
+  <div class="overall">
+    <div class="ring" id="ring" data-pct="0%"></div>
+    <div class="meta">
+      <b id="ovText">0 of 0 steps done</b>
+      <div class="bartrack"><div class="barfill" id="ovBar"></div></div>
+    </div>
+    <button class="btn" id="resetBtn">↺ Reset progress</button>
+  </div>
+
+  <div class="next" id="nextBanner">
+    <span class="lab" id="nextLab">Next step</span>
+    <div class="what" id="nextWhat">—</div>
+    <button class="btn" id="nextJump">Go →</button>
+  </div>
+
+  <div id="plans"></div>
+
+  <div class="legend">
+    <span>🧪 <span class="tag t-test">test</span> write test</span>
+    <span>🔴 <span class="tag t-fail">run→fail</span></span>
+    <span>🟢 <span class="tag t-pass">run→pass</span></span>
+    <span>🔨 <span class="tag t-impl">implement</span></span>
+    <span>🔁 <span class="tag t-reg">regression</span></span>
+    <span>📦 <span class="tag t-build">build</span></span>
+    <span>💾 <span class="tag t-commit">commit</span></span>
+  </div>
+  <p class="note">Full code for every step lives in the matching <code>*.md</code> file next to this page. This is the map; the markdown is the territory.</p>
+  <footer>generated for ADHD-friendly scanning · progress stored locally per device</footer>
+</div>
+
+<script>
+const PLANS = [
+ {id:"guard", emoji:"🛡️", order:1, title:"Domain-aware modification guard",
+  file:"2026-06-06-domain-aware-modification-guard.md",
+  goal:"cg_guard: a pre-edit report — blast radius + DDD type grouping + bounded contexts + matching business rules.",
+  arch:"handleCgGuard delegates to a pure GuardReportBuilder that combines GraphTraversal.impact() with two new DomainSqliteStore queries. Degrades to blast-radius-only when tier isn't DDD. No new deps — pure reuse of your domain moat.",
+  tasks:[
+   ["DomainSqliteStore query helpers + tests",
+     ["Write failing test (DomainSqliteStoreGuardQueryTest)","Run → compile fail","Implement findRulesMentioning + findContextsContaining","Run → green","Commit"]],
+   ["GuardReportBuilder — pure logic + tests",
+     ["Write failing test (GuardReportBuilderTest)","Run → compile fail","Implement GuardReportBuilder","Run → green","Commit"]],
+   ["cg_guard MCP tool + handler test",
+     ["Write failing tests in CodeNavigatorMcpServerTest","Run → compile fail","Implement handleCgGuard + register tool","Run → green","Commit"]],
+   ["Edge-case tests",
+     ["Write tests: symbol-not-found, non-DDD tier","Run → green","Full suite → no regressions","Commit"]],
+  ]},
+
+ {id:"bench", emoji:"📊", order:2, title:"Token-savings benchmark",
+  file:"2026-06-06-token-savings-benchmark.md",
+  goal:"A 'benchmark' CLI subcommand that prints a markdown token-savings table: navigator output vs naive read-everything.",
+  arch:"TokenEstimator (chars/4, zero deps) feeds a BenchmarkRunner over three fixed scenarios against a live GraphStore/GraphTraversal/BriefingGenerator. BenchmarkCommand wires it as a Picocli Runnable. Proof for the README — no schema change, no new MCP tool.",
+  tasks:[
+   ["TokenEstimator + unit tests",
+     ["Write failing test","Run → FAIL (class missing)","Implement TokenEstimator","Run → PASS","Commit"]],
+   ["BenchmarkRow + BenchmarkRunner + integration test",
+     ["Write failing test (against sample-ddd)","Run → FAIL","Write BenchmarkRow record","Write BenchmarkRunner","Run → PASS","Commit"]],
+   ["MarkdownTableRenderer + unit test",
+     ["Write failing test","Run → FAIL","Implement renderer","Run → PASS","Commit"]],
+   ["BenchmarkCommand + wire into app",
+     ["Write BenchmarkCommand","Register in CodeNavigatorApplication","Full suite still passes","Build JAR → 'benchmark' shows in help","Commit"]],
+  ]},
+
+ {id:"git", emoji:"🔗", order:3, title:"Git co-change coupling",
+  file:"2026-06-06-git-co-change-coupling.md",
+  goal:"Mine git history for files that change together; new cg_coupling tool + co-change annotations on cg_impact.",
+  arch:"GitHistoryAnalyzer (JGit) walks the last N commits, counting every file pair; results persist in a new co_change table. ProjectIndexer.indexFull calls it, guarded so non-git projects skip silently. Closes the biggest gap vs competitors (Qartez et al).",
+  tasks:[
+   ["Add JGit dependency + verify build",
+     ["Add JGit line to build.gradle deps","Build → JGit resolves, JAR compiles","Commit"]],
+   ["co_change table + GraphStore upsert/query",
+     ["Add tests to GraphStoreTest","Run → fail (methods missing)","Add co_change table to initSchema","Add CoChangePair record + upsert/topCoupled","Run 4 tests → pass","Full suite → no regressions","Commit"]],
+   ["GitHistoryAnalyzer + temp-repo test",
+     ["Create GitHistoryAnalyzerTest (builds tiny git repo)","Run → fail (class missing)","Create GitHistoryAnalyzer","Run 4 analyzer tests → pass","Full suite → no regressions","Commit"]],
+   ["Wire into ProjectIndexer.indexFull",
+     ["Add import to ProjectIndexer","Add git-analysis call at end of indexFull","Build → compiles","Full suite (non-git path covered)","Commit"]],
+   ["cg_coupling MCP tool",
+     ["Add cg_coupling tests","Run → fail (handler missing)","Register cg_coupling tool","Add handleCgCoupling handler","Run 4 tests → pass","Full suite","Commit"]],
+   ["Annotate cg_impact with co-change counts",
+     ["Add annotation test","Run → fail","Replace handleCgImpact with annotated version","Run annotation test → pass","Full suite","Build fat JAR","Commit"]],
+  ]},
+
+ {id:"lib", emoji:"📚", order:4, title:"Library / dependency boundary indexing",
+  file:"2026-06-06-library-dependency-indexing.md",
+  goal:"Index build-file deps as LIBRARY nodes so cg_callees/cg_impact show the library boundary; new cg_deps tool.",
+  arch:"DependencyParser reads build.gradle / pom.xml (no network, no jar decompile). EdgeExtractor mints NodeType.LIBRARY nodes + USES_LIBRARY edges for unresolved imports that match a declared dependency. cg_deps reports what's actually used.",
+  tasks:[
+   ["Add NodeType.LIBRARY + EdgeType.USES_LIBRARY",
+     ["Failing test (NodeTypeEdgeTypeTest)","Run → compile fail","Edit NodeType.java","Edit EdgeType.java","Run → pass","Commit"]],
+   ["Dependency record + DependencyParser (Gradle+Maven)",
+     ["Failing test (DependencyParserTest)","Run → compile fail","Create Dependency.java","Create DependencyParser.java","Run → pass","Commit"]],
+   ["Library-node minting in EdgeExtractor",
+     ["Failing test (EdgeExtractorLibraryTest)","Run → fail (no 3-arg ctor)","Modify EdgeExtractor to mint LIBRARY nodes","Run → pass","Verify existing EdgeExtractor tests pass","Commit"]],
+   ["Wire DependencyParser into ProjectIndexer",
+     ["Fixture: sample-spring/build.gradle","Failing test (ProjectIndexerIntegrationTest)","Run → fail (0 library nodes)","Modify ProjectIndexer (field + indexFull/indexIncremental)","Run → pass","Commit"]],
+   ["cg_deps MCP tool",
+     ["Failing test (CgDepsHandlerTest)","Run → fail (handler missing)","Register cg_deps + add handleCgDeps","Run → pass","Existing MCP tests → no regression","Commit"]],
+   ["Make cg_callees + cg_impact show LIBRARY nodes",
+     ["Write failing test (2 methods)","Run → impact PASS, callees FAIL","Add USES_LIBRARY to CALL_EDGE_TYPES","Run → both pass","Full suite → no regressions","Commit"]],
+  ]},
+
+ {id:"sem", emoji:"🧠", order:5, title:"Semantic / vector search",
+  file:"2026-06-06-semantic-vector-search.md",
+  goal:"Opt-in local embeddings so cg_search ranks by meaning, fused with FTS5 via RRF — zero regression when off.",
+  arch:"Pluggable EmbeddingProvider (Ollama via JDK HttpClient + Jackson, or Noop). float[] BLOBs in a new embeddings table. SearchService fuses FTS5 + cosine with Reciprocal Rank Fusion. Gated by CODE_NAVIGATOR_EMBEDDINGS=1. Largest effort; adds an optional runtime dep.",
+  tasks:[
+   ["VectorCodec — float[] ↔ byte[] round-trip",
+     ["Write failing test","Run → FAIL","Implement VectorCodec","Run → PASS","Commit"]],
+   ["embeddings table + GraphStore upsert/streamAll",
+     ["Write failing test (GraphStoreTest)","Run → FAIL","Add embeddings table to initSchema","Add upsert + streamAll","Run → PASS","Commit"]],
+   ["EmbeddingProvider + Noop + cosine()",
+     ["Write failing tests","Run → FAIL","Implement EmbeddingProvider interface","Implement NoopEmbeddingProvider","Add cosine() to SearchService","Run → PASS","Commit"]],
+   ["RRF fusion pure function",
+     ["Write failing tests (RrfFusionTest)","Run → FAIL","Add rrf() to SearchService","Run → PASS","Commit"]],
+   ["SearchService hybrid path — inject provider",
+     ["Write failing tests (SearchServiceTest)","Run → FAIL","Rewrite SearchService (provider + hybrid search)","Run → PASS","Full suite → no regression","Commit"]],
+   ["OllamaEmbeddingProvider + test seam",
+     ["Write failing tests (EmbeddingProviderTest)","Run → FAIL","Implement OllamaEmbeddingProvider","Run → PASS","Full suite","Commit"]],
+   ["Opt-in wiring guarded by env flag",
+     ["Write failing test (new file)","Run → FAIL","Modify ProjectIndexer (field + ctors + embed step)","Modify CodeNavigatorApplication (env-flag provider)","Run → PASS","Full suite","Build shadow JAR","Commit"]],
+  ]},
+];
+
+// ---- step type classification (icon + tag) ----
+function classify(s){
+  const t=s.toLowerCase();
+  if(/commit/.test(t)) return {i:"💾",c:"t-commit",n:"commit"};
+  if(/build|fat jar|shadow jar|jar →|jar and|help output|appears in/.test(t)) return {i:"📦",c:"t-build",n:"build"};
+  if(/full suite|no regression|existing .*tests|still pass|still passes|existing mcp/.test(t)) return {i:"🔁",c:"t-reg",n:"regression"};
+  if(/pass|green|→ both pass|→ pass/.test(t) && /run/.test(t)) return {i:"🟢",c:"t-pass",n:"run→pass"};
+  if(/fail/.test(t) && /run/.test(t)) return {i:"🔴",c:"t-fail",n:"run→fail"};
+  if(/fixture/.test(t)) return {i:"🧱",c:"t-fix",n:"fixture"};
+  if(/write .*test|failing test|add .*test|add tests/.test(t)) return {i:"🧪",c:"t-test",n:"test"};
+  if(/implement|create|add |modify|rewrite|replace|register|edit |edit\b/.test(t)) return {i:"🔨",c:"t-impl",n:"do"};
+  return {i:"▫️",c:"t-step",n:"step"};
+}
+
+// Steps Claude has actually completed (id = "planId.taskIndex.stepIndex").
+// Updated live while the executing-plans skill runs.
+const SEED_DONE = ["guard.0.0","guard.0.1","guard.0.2","guard.0.3","guard.0.4",
+  "guard.1.0","guard.1.1","guard.1.2","guard.1.3","guard.1.4",
+  "guard.2.0","guard.2.1","guard.2.2","guard.2.3","guard.2.4",
+  "guard.3.0","guard.3.1","guard.3.2","guard.3.3",
+  "bench.0.0","bench.0.1","bench.0.2","bench.0.3","bench.0.4",
+  "bench.1.0","bench.1.1","bench.1.2","bench.1.3","bench.1.4","bench.1.5",
+  "bench.2.0","bench.2.1","bench.2.2","bench.2.3","bench.2.4",
+  "bench.3.0","bench.3.1","bench.3.2","bench.3.3","bench.3.4",
+  "git.0.0","git.0.1","git.0.2",
+  "git.1.0","git.1.1","git.1.2","git.1.3","git.1.4","git.1.5","git.1.6",
+  "git.2.0","git.2.1","git.2.2","git.2.3","git.2.4","git.2.5",
+  "git.3.0","git.3.1","git.3.2","git.3.3","git.3.4",
+  "git.4.0","git.4.1","git.4.2","git.4.3","git.4.4","git.4.5","git.4.6",
+  "git.5.0","git.5.1","git.5.2","git.5.3","git.5.4","git.5.5","git.5.6",
+  "lib.0.0","lib.0.1","lib.0.2","lib.0.3","lib.0.4","lib.0.5",
+  "lib.1.0","lib.1.1","lib.1.2","lib.1.3","lib.1.4","lib.1.5",
+  "lib.2.0","lib.2.1","lib.2.2","lib.2.3","lib.2.4","lib.2.5",
+  "lib.3.0","lib.3.1","lib.3.2","lib.3.3","lib.3.4","lib.3.5",
+  "lib.4.0","lib.4.1","lib.4.2","lib.4.3","lib.4.4","lib.4.5",
+  "lib.5.0","lib.5.1","lib.5.2","lib.5.3","lib.5.4","lib.5.5"];
+
+const KEY="cgnav-plan-progress-v1";
+const state=JSON.parse(localStorage.getItem(KEY)||"{}");
+// Merge in Claude's real progress (only adds; user ticks still win in-session).
+SEED_DONE.forEach(id=>{ if(state[id]===undefined) state[id]=true; });
+const sid=(p,t,s)=>`${p}.${t}.${s}`;
+const save=()=>localStorage.setItem(KEY,JSON.stringify(state));
+
+const root=document.getElementById("plans");
+PLANS.sort((a,b)=>a.order-b.order).forEach(p=>{
+  const card=document.createElement("div");
+  card.className="card"; card.dataset.o=p.order; card.id="card-"+p.id;
+  const stepCount=p.tasks.reduce((n,t)=>n+t[1].length,0);
+  card.innerHTML=`
+   <div class="phead">
+     <div class="emoji">${p.emoji}</div>
+     <div class="ptitle">
+       <div class="ordno">STEP ${p.order} OF 5</div>
+       <h2>${p.title}</h2>
+       <p class="goal">${p.goal}</p>
+     </div>
+     <div class="pmini">
+       <div class="pct" id="pct-${p.id}">0%</div>
+       <div class="cnt"><span id="cnt-${p.id}">0</span>/${stepCount} steps</div>
+       <div class="pbar"><i id="bar-${p.id}"></i></div>
+     </div>
+     <div class="chev">▶</div>
+   </div>
+   <div class="pbody">
+     <div class="arch">${p.arch.replace(/`([^`]+)`/g,'<code>$1</code>')}</div>
+     <div id="tasks-${p.id}"></div>
+     <p class="note">📄 full code &amp; commands → <code>${p.file}</code></p>
+   </div>`;
+  root.appendChild(card);
+
+  const tasksEl=card.querySelector("#tasks-"+p.id);
+  p.tasks.forEach((task,ti)=>{
+    const[ttitle,steps]=task;
+    const te=document.createElement("div");
+    te.className="task"; te.id=`task-${p.id}-${ti}`;
+    te.innerHTML=`
+      <div class="thead">
+        <div class="tnum">${ti+1}</div>
+        <div class="tt">${ttitle}</div>
+        <div class="tprog" id="tp-${p.id}-${ti}"></div>
+        <div class="tchev">▶</div>
+      </div>
+      <div class="tbody"></div>`;
+    const body=te.querySelector(".tbody");
+    steps.forEach((st,si)=>{
+      const id=sid(p.id,ti,si); const cls=classify(st);
+      const row=document.createElement("label");
+      row.className="step"+(state[id]?" checked":"");
+      row.innerHTML=`<input type="checkbox" ${state[id]?"checked":""}>
+        <span class="ico">${cls.i}</span>
+        <span class="lab">${st}<span class="tag ${cls.c}">${cls.n}</span></span>`;
+      const cb=row.querySelector("input");
+      cb.addEventListener("change",()=>{
+        state[id]=cb.checked; if(!cb.checked) delete state[id];
+        row.classList.toggle("checked",cb.checked); save(); refresh();
+      });
+      body.appendChild(row);
+    });
+    te.querySelector(".thead").addEventListener("click",e=>{
+      if(e.target.closest("input"))return; te.classList.toggle("open");
+    });
+    tasksEl.appendChild(te);
+  });
+
+  card.querySelector(".phead").addEventListener("click",()=>{
+    const wasOpen=card.classList.contains("open");
+    document.querySelectorAll(".card.open").forEach(c=>c.classList.remove("open"));
+    if(!wasOpen) card.classList.add("open");
+  });
+});
+
+function refresh(){
+  let totDone=0,tot=0; let next=null;
+  PLANS.forEach(p=>{
+    let pd=0,pt=0;
+    p.tasks.forEach((task,ti)=>{
+      const steps=task[1]; let td=0;
+      steps.forEach((st,si)=>{ const done=!!state[sid(p.id,ti,si)];
+        pt++; tot++; if(done){pd++;td++;totDone++;}
+        else if(!next) next={p,ti,si,task:task[0],step:st};
+      });
+      const tp=document.getElementById(`tp-${p.id}-${ti}`);
+      if(tp) tp.textContent=`${td}/${steps.length}`;
+      const tEl=document.getElementById(`task-${p.id}-${ti}`);
+      if(tEl) tEl.classList.toggle("done",td===steps.length&&steps.length>0);
+    });
+    const pct=pt?Math.round(pd/pt*100):0;
+    const set=(id,v,prop="textContent")=>{const e=document.getElementById(id); if(e)e[prop]=v;};
+    set("pct-"+p.id,pct+"%"); set("cnt-"+p.id,pd);
+    const bar=document.getElementById("bar-"+p.id); if(bar)bar.style.width=pct+"%";
+  });
+  const ov=tot?Math.round(totDone/tot*100):0;
+  const ring=document.getElementById("ring");
+  ring.style.setProperty("--p",ov); ring.dataset.pct=ov+"%";
+  document.getElementById("ovBar").style.width=ov+"%";
+  document.getElementById("ovText").textContent=`${totDone} of ${tot} steps done`;
+
+  const nb=document.getElementById("nextBanner");
+  if(next){
+    nb.classList.remove("done");
+    document.getElementById("nextLab").textContent="👉 Next step";
+    document.getElementById("nextWhat").innerHTML=
+      `${next.p.emoji} <b>${next.step}</b><br><span class="path">${next.p.title} · Task ${next.ti+1}: ${next.task}</span>`;
+    document.getElementById("nextJump").style.display="";
+    document.getElementById("nextJump").onclick=()=>{
+      document.querySelectorAll(".card.open").forEach(c=>c.classList.remove("open"));
+      const card=document.getElementById("card-"+next.p.id); card.classList.add("open");
+      const t=document.getElementById(`task-${next.p.id}-${next.ti}`); t.classList.add("open");
+      t.scrollIntoView({behavior:"smooth",block:"center"});
+    };
+  }else{
+    nb.classList.add("done");
+    document.getElementById("nextLab").textContent="🎉 All done";
+    document.getElementById("nextWhat").innerHTML="<b>Every step checked across all five plans. Ship it.</b>";
+    document.getElementById("nextJump").style.display="none";
+  }
+}
+
+document.getElementById("resetBtn").addEventListener("click",()=>{
+  if(!confirm("Clear all checked steps?"))return;
+  for(const k in state)delete state[k]; save();
+  document.querySelectorAll(".step input").forEach(c=>c.checked=false);
+  document.querySelectorAll(".step.checked").forEach(s=>s.classList.remove("checked"));
+  refresh();
+});
+
+// ---- open-card + scroll persistence (keeps view stable across live refreshes) ----
+function rememberOpen(){
+  const open=document.querySelector(".card.open");
+  sessionStorage.setItem("cgnav-open", open?open.id:"card-guard");
+  sessionStorage.setItem("cgnav-scroll", String(window.scrollY));
+}
+document.querySelectorAll(".phead").forEach(h=>h.addEventListener("click",()=>setTimeout(rememberOpen,0)));
+window.addEventListener("beforeunload",rememberOpen);
+
+const openId=sessionStorage.getItem("cgnav-open")||"card-guard";
+(document.getElementById(openId)||document.getElementById("card-guard")).classList.add("open");
+refresh();
+const sy=parseInt(sessionStorage.getItem("cgnav-scroll")||"0",10);
+if(sy)window.scrollTo(0,sy);
+
+// ---- LIVE auto-refresh (so you watch Claude tick steps in real time) ----
+let LIVE=true;
+const badge=document.createElement("button");
+badge.className="btn"; badge.style.cssText="position:fixed;right:16px;bottom:16px;z-index:50";
+function paintBadge(){ badge.innerHTML=LIVE?"🔴 LIVE · auto-refresh on":"⚪ paused · click for live"; }
+paintBadge(); document.body.appendChild(badge);
+badge.addEventListener("click",()=>{LIVE=!LIVE; paintBadge(); if(LIVE)schedule();});
+function schedule(){ if(!LIVE)return; setTimeout(()=>{ if(LIVE){rememberOpen(); location.reload();} },4000); }
+schedule();
+</script>
+</body>
+</html>

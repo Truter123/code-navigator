@@ -23,3 +23,8 @@ navigators/
 
 # Note: jars/code-navigator.jar is intentionally tracked — it is the runtime
 # artifact loaded by the attached code-navigator MCP.
+
+# Local-only artifacts that must not be published
+jars/*.bak-*
+**/.claude
+*.bundle

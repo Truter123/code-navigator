@@ -1,0 +1,16 @@
+package com.codenavigator.graph;
+
+public enum EdgeType {
+    // Tier 1: Generic
+    INJECTS, CALLS_METHOD, IMPLEMENTS, EXTENDS, RETURNS_TYPE,
+    // Tier 2: Spring
+    READS_VIEW, UPDATES_VIEW, PUBLISHES_EVENT,
+    // Tier 3: DDD
+    DISPATCHES_COMMAND, DISPATCHES_QUERY, HANDLES,
+    LOADS_AGGREGATE, EMITS_EVENT, APPLIES_EVENT,
+    PROJECTS_EVENT, LISTENS_TO,
+    // Frontend
+    CALLS_API, USES_SERVICE,
+    // External
+    USES_LIBRARY
+}
