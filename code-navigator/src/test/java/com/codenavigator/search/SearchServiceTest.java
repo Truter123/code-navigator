@@ -89,4 +89,27 @@ class SearchServiceTest {
         var results = hybrid.search("PurchaseOrder");
         assertThat(results).extracting(Node::name).contains("WorkerController");
     }
+
+    @Test
+    void contextSearchWithNoop_identicalToLegacy() {
+        var noop = new SearchService(store, new GraphTraversal(store), new NoopEmbeddingProvider());
+        var dflt = new SearchService(store, new GraphTraversal(store));
+        assertThat(noop.contextSearch("create purchase order"))
+            .extracting(Node::id)
+            .containsExactlyElementsOf(dflt.contextSearch("create purchase order").stream().map(Node::id).toList());
+    }
+
+    @Test
+    void contextSearchWithFakeProvider_addsSemanticSeedKeywordsMiss() {
+        // A node with no keyword overlap with the task, surfaced only by its embedding.
+        store.saveNode(new Node("com.LoginValidator", NodeType.SERVICE,
+            "LoginValidator", "com.LoginValidator", "Login.java", 1, "checks credentials", 0));
+        store.upsertEmbedding("com.LoginValidator", new float[]{1.0f, 0.0f});
+
+        EmbeddingProvider fake = text -> new float[]{1.0f, 0.0f};
+        var hybrid = new SearchService(store, new GraphTraversal(store), fake);
+
+        var nodes = hybrid.contextSearch("where does request authentication happen");
+        assertThat(nodes).extracting(Node::name).contains("LoginValidator");
+    }
 }

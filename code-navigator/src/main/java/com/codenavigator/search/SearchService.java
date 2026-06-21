@@ -18,6 +18,8 @@ public class SearchService {
         "field", "method", "class", "file", "when", "if", "not", "all", "new"
     );
 
+    private static final int SEMANTIC_SEED_LIMIT = 10;
+
     private final GraphStore store;
     private final GraphTraversal traversal;
     private final EmbeddingProvider embeddingProvider;
@@ -72,9 +74,13 @@ public class SearchService {
 
     /**
      * Context search for a task description:
-     * 1. Extract keywords -> FTS5 prefix search
-     * 2. Expand hits via chain tracing
-     * 3. Deduplicate, return
+     * 1. Extract keywords -> FTS5 prefix search (seed set)
+     * 2. If embeddings available, add top-N cosine hits for the whole task to the seed set
+     * 3. Expand seeds via chain tracing
+     * 4. Deduplicate, return
+     *
+     * With NoopEmbeddingProvider the query vector is empty, so step 2 is a no-op
+     * and the output is identical to the legacy keyword-only behaviour.
      */
     public List<Node> contextSearch(String taskDescription) {
         var keywords = extractKeywords(taskDescription);
@@ -83,6 +89,15 @@ public class SearchService {
         var directHits = new LinkedHashSet<Node>();
         for (var keyword : keywords) {
             directHits.addAll(store.searchFts(keyword + "*"));
+        }
+
+        float[] queryVec = embeddingProvider.embed(taskDescription);
+        if (queryVec.length > 0) {
+            vectorRank(queryVec).stream()
+                .limit(SEMANTIC_SEED_LIMIT)
+                .map(id -> store.findNodeById(id).orElse(null))
+                .filter(Objects::nonNull)
+                .forEach(directHits::add);
         }
 
         var expanded = new LinkedHashSet<Node>(directHits);
