@@ -94,6 +94,13 @@ public class GraphStore implements AutoCloseable {
 
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_co_change_a ON co_change(file_a)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_co_change_b ON co_change(file_b)");
+
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS embeddings (
+                    node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+                    vector  BLOB NOT NULL,
+                    dim     INTEGER NOT NULL
+                )""");
         }
     }
 
@@ -401,6 +408,44 @@ public class GraphStore implements AutoCloseable {
             return mapNodes(ps.executeQuery());
         } catch (SQLException e) {
             throw new RuntimeException("LIKE search failed for pattern: " + pattern, e);
+        }
+    }
+
+    // ---- Embedding operations ----
+
+    public void upsertEmbedding(String nodeId, float[] vector) {
+        byte[] blob = com.codenavigator.embedding.VectorCodec.toBytes(vector);
+        try (PreparedStatement ps = connection.prepareStatement(
+                "INSERT OR REPLACE INTO embeddings (node_id, vector, dim) VALUES (?, ?, ?)")) {
+            ps.setString(1, nodeId);
+            ps.setBytes(2, blob);
+            ps.setInt(3, vector.length);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to upsert embedding for node: " + nodeId, e);
+        }
+    }
+
+    public void streamAllEmbeddings(java.util.function.BiConsumer<String, float[]> consumer) {
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT node_id, vector FROM embeddings")) {
+            while (rs.next()) {
+                String nodeId = rs.getString("node_id");
+                byte[] blob = rs.getBytes("vector");
+                consumer.accept(nodeId, com.codenavigator.embedding.VectorCodec.toFloats(blob));
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to stream embeddings", e);
+        }
+    }
+
+    /** Count of nodes that currently have a stored embedding. */
+    public int countEmbeddings() {
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM embeddings")) {
+            return rs.next() ? rs.getInt(1) : 0;
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to count embeddings", e);
         }
     }
 
