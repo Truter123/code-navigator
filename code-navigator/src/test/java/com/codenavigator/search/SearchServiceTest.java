@@ -135,4 +135,22 @@ class SearchServiceTest {
         var topK = hybrid.search("authentication").stream().limit(3).map(Node::name).toList();
         assertThat(topK).contains("CredentialChecker");
     }
+
+    @Test
+    void hybridSearch_ignoresVectorsOfMismatchedDimension() {
+        // Simulates changing OLLAMA_MODEL without reindexing: stored vectors of differing dims.
+        store.saveNode(new Node("com.DimMatch", NodeType.SERVICE,
+            "DimMatch", "com.DimMatch", "Match.java", 1, "aligned vector", 0));
+        store.upsertEmbedding("com.DimMatch", new float[]{1.0f, 0.0f});            // 2-dim, matches query dim
+        store.saveNode(new Node("com.DimMismatch", NodeType.SERVICE,
+            "DimMismatch", "com.DimMismatch", "Mismatch.java", 1, "stale vector", 0));
+        store.upsertEmbedding("com.DimMismatch", new float[]{0.0f, 0.0f, 1.0f});   // 3-dim, from an old model
+
+        EmbeddingProvider fake = text -> new float[]{1.0f, 0.0f};                  // 2-dim query vector
+        var hybrid = new SearchService(store, new GraphTraversal(store), fake);
+
+        var names = hybrid.search("zzznomatchterm").stream().map(Node::name).toList();
+        assertThat(names).contains("DimMatch");           // matching-dim vector surfaces
+        assertThat(names).doesNotContain("DimMismatch");  // mismatched-dim vector silently ignored (cosine==0)
+    }
 }
