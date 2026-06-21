@@ -1,5 +1,7 @@
 package com.codenavigator.search;
 
+import com.codenavigator.embedding.EmbeddingProvider;
+import com.codenavigator.embedding.NoopEmbeddingProvider;
 import com.codenavigator.graph.GraphStore;
 import com.codenavigator.graph.GraphTraversal;
 import com.codenavigator.graph.Node;
@@ -18,31 +20,61 @@ public class SearchService {
 
     private final GraphStore store;
     private final GraphTraversal traversal;
+    private final EmbeddingProvider embeddingProvider;
 
+    /** Legacy constructor — embeddings disabled (Noop). */
     public SearchService(GraphStore store, GraphTraversal traversal) {
-        this.store = store;
-        this.traversal = traversal;
+        this(store, traversal, new NoopEmbeddingProvider());
     }
 
-    /** FTS5 search by query string, with LIKE fallback for substring matches */
+    /** Full constructor with injectable EmbeddingProvider. */
+    public SearchService(GraphStore store, GraphTraversal traversal, EmbeddingProvider embeddingProvider) {
+        this.store = store;
+        this.traversal = traversal;
+        this.embeddingProvider = embeddingProvider;
+    }
+
+    /**
+     * Hybrid search: FTS5 (with LIKE fallback) and, when embeddings are available,
+     * cosine-rank stored vectors against the query embedding, fused via RRF.
+     * When the provider returns an empty vector, this degrades to the original FTS5 path.
+     */
     public List<Node> search(String query) {
         String ftsQuery = query.endsWith("*") ? query : query + "*";
-        var seen = new LinkedHashMap<String, Node>();
+        var ftsOrdered = new LinkedHashMap<String, Node>();
         for (var node : store.searchFts(ftsQuery)) {
-            seen.put(node.id(), node);
+            ftsOrdered.put(node.id(), node);
         }
         for (var node : store.searchLike(query)) {
-            seen.putIfAbsent(node.id(), node);
+            ftsOrdered.putIfAbsent(node.id(), node);
         }
-        return new ArrayList<>(seen.values());
+
+        float[] queryVec = embeddingProvider.embed(query);
+        if (queryVec.length == 0) {
+            return new ArrayList<>(ftsOrdered.values()); // original behaviour
+        }
+
+        List<String> vecRanked = vectorRank(queryVec);
+        List<String> ftsRanked = new ArrayList<>(ftsOrdered.keySet());
+        List<String> fused = rrf(60, ftsRanked, vecRanked);
+
+        Map<String, Node> allKnown = new LinkedHashMap<>(ftsOrdered);
+        for (String id : vecRanked) {
+            allKnown.computeIfAbsent(id, k -> store.findNodeById(k).orElse(null));
+        }
+        allKnown.values().removeIf(Objects::isNull);
+
+        return fused.stream()
+            .filter(allKnown::containsKey)
+            .map(allKnown::get)
+            .collect(Collectors.toList());
     }
 
     /**
      * Context search for a task description:
-     * 1. Extract keywords
-     * 2. FTS5 search each keyword with prefix matching
-     * 3. Expand hits via chain tracing
-     * 4. Deduplicate, return
+     * 1. Extract keywords -> FTS5 prefix search
+     * 2. Expand hits via chain tracing
+     * 3. Deduplicate, return
      */
     public List<Node> contextSearch(String taskDescription) {
         var keywords = extractKeywords(taskDescription);
@@ -57,8 +89,18 @@ public class SearchService {
         for (var hit : directHits) {
             expanded.addAll(traversal.traceChain(hit.id()));
         }
-
         return new ArrayList<>(expanded);
+    }
+
+    /** Cosine-rank all stored embeddings against a query vector (desc, sim>0). */
+    private List<String> vectorRank(float[] queryVec) {
+        List<Map.Entry<String, Float>> scored = new ArrayList<>();
+        store.streamAllEmbeddings((nodeId, vector) -> {
+            float sim = cosine(queryVec, vector);
+            if (sim > 0.0f) scored.add(Map.entry(nodeId, sim));
+        });
+        scored.sort(Map.Entry.<String, Float>comparingByValue().reversed());
+        return scored.stream().map(Map.Entry::getKey).collect(Collectors.toList());
     }
 
     /** Extract meaningful keywords from text, filtering stop words */
@@ -88,12 +130,7 @@ public class SearchService {
     }
 
     /**
-     * Reciprocal Rank Fusion over an arbitrary number of ranked ID lists.
-     * Score for each ID = sum_over_lists( 1 / (k + rank_1based) ).
-     * Returns IDs in descending score order, deduplicated.
-     *
-     * @param k     RRF smoothing constant (60 is standard)
-     * @param lists ranked lists of node IDs (best first)
+     * Reciprocal Rank Fusion over ranked ID lists. Score = sum( 1 / (k + rank_1based) ).
      */
     @SafeVarargs
     static List<String> rrf(int k, List<String>... lists) {

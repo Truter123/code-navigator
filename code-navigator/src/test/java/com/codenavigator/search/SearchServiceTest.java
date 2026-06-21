@@ -1,5 +1,7 @@
 package com.codenavigator.search;
 
+import com.codenavigator.embedding.EmbeddingProvider;
+import com.codenavigator.embedding.NoopEmbeddingProvider;
 import com.codenavigator.graph.*;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
@@ -59,5 +61,32 @@ class SearchServiceTest {
     void extractKeywordsFiltersShortWords() {
         var keywords = searchService.extractKeywords("do it on a go");
         assertThat(keywords).isEmpty();
+    }
+
+    @Test
+    void searchWithNoop_behaviorIdenticalToFtsOnly() {
+        var noopService = new SearchService(store, new GraphTraversal(store), new NoopEmbeddingProvider());
+        var defaultService = new SearchService(store, new GraphTraversal(store));
+
+        var withNoop = noopService.search("PurchaseOrder");
+        var withDefault = defaultService.search("PurchaseOrder");
+
+        assertThat(withNoop).extracting(Node::id)
+            .containsExactlyInAnyOrderElementsOf(withDefault.stream().map(Node::id).toList());
+    }
+
+    @Test
+    void searchWithFakeProvider_promotesSemanticMatchFtsMisses() {
+        // A node whose text contains no "PurchaseOrder" token (FTS won't surface it),
+        // but whose embedding is aligned with the (faked) query vector.
+        store.saveNode(new Node("com.WorkerController", NodeType.CONTROLLER,
+            "WorkerController", "com.WorkerController", "Worker.java", 1, "handles work", 0));
+        store.upsertEmbedding("com.WorkerController", new float[]{1.0f, 0.0f});
+
+        EmbeddingProvider fakeProvider = text -> new float[]{1.0f, 0.0f};
+        var hybrid = new SearchService(store, new GraphTraversal(store), fakeProvider);
+
+        var results = hybrid.search("PurchaseOrder");
+        assertThat(results).extracting(Node::name).contains("WorkerController");
     }
 }
