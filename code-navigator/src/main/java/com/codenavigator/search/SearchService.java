@@ -86,4 +86,26 @@ public class SearchService {
         double denom = Math.sqrt(normA) * Math.sqrt(normB);
         return denom == 0.0 ? 0.0f : (float) (dot / denom);
     }
+
+    /**
+     * Reciprocal Rank Fusion over an arbitrary number of ranked ID lists.
+     * Score for each ID = sum_over_lists( 1 / (k + rank_1based) ).
+     * Returns IDs in descending score order, deduplicated.
+     *
+     * @param k     RRF smoothing constant (60 is standard)
+     * @param lists ranked lists of node IDs (best first)
+     */
+    @SafeVarargs
+    static List<String> rrf(int k, List<String>... lists) {
+        Map<String, Double> scores = new LinkedHashMap<>();
+        for (List<String> list : lists) {
+            for (int i = 0; i < list.size(); i++) {
+                scores.merge(list.get(i), 1.0 / (k + i + 1), Double::sum);
+            }
+        }
+        return scores.entrySet().stream()
+            .sorted(Map.Entry.<String, Double>comparingByValue().reversed())
+            .map(Map.Entry::getKey)
+            .collect(Collectors.toList());
+    }
 }
