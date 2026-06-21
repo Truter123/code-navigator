@@ -2,6 +2,7 @@ package com.codenavigator.mcp;
 
 import com.codenavigator.domain.DomainSqliteStore;
 import com.codenavigator.domain.DomainToolHandlers;
+import com.codenavigator.embedding.NoopEmbeddingProvider;
 import com.codenavigator.graph.*;
 import com.codenavigator.search.SearchService;
 import org.junit.jupiter.api.AfterEach;
@@ -26,7 +27,7 @@ class CgDepsHandlerTest {
         var traversal = new GraphTraversal(store);
         var search = new SearchService(store, traversal);
         var domainHandlers = new DomainToolHandlers(new DomainSqliteStore(tempDir.resolve("domain.db")), null);
-        mcpServer = new CodeNavigatorMcpServer(store, traversal, search, domainHandlers);
+        mcpServer = new CodeNavigatorMcpServer(store, traversal, search, domainHandlers, new NoopEmbeddingProvider());
         buildLibraryGraph();
     }
 
@@ -103,7 +104,7 @@ class CgDepsHandlerTest {
         var emptySearch = new SearchService(emptyStore, emptyTraversal);
         var emptyDomain = new DomainToolHandlers(
             new DomainSqliteStore(tempDir.resolve("empty-domain.db")), null);
-        var emptyServer = new CodeNavigatorMcpServer(emptyStore, emptyTraversal, emptySearch, emptyDomain);
+        var emptyServer = new CodeNavigatorMcpServer(emptyStore, emptyTraversal, emptySearch, emptyDomain, new NoopEmbeddingProvider());
 
         var result = emptyServer.handleCgDeps(Map.of());
         assertThat(result).contains("No dependency");

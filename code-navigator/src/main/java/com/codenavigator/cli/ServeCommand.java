@@ -26,7 +26,8 @@ public class ServeCommand implements Runnable {
 
         var store = new GraphStore(ProjectPaths.graphDb(root));
         var traversal = new GraphTraversal(store);
-        var search = new SearchService(store, traversal);
+        var embeddingProvider = com.codenavigator.embedding.EmbeddingProviders.fromEnv();
+        var search = new SearchService(store, traversal, embeddingProvider);
 
         // Bootstrap domain extraction
         var domainDb = ProjectPaths.domainDb(root);
@@ -40,7 +41,7 @@ public class ServeCommand implements Runnable {
         }
         var domainHandlers = new DomainToolHandlers(domainStore, ProjectPaths.graphDb(root));
 
-        var mcpServer = new CodeNavigatorMcpServer(store, traversal, search, domainHandlers);
+        var mcpServer = new CodeNavigatorMcpServer(store, traversal, search, domainHandlers, embeddingProvider);
         System.err.println("code-navigator MCP server started (stdio) — 22 tools");
         mcpServer.start();
     }

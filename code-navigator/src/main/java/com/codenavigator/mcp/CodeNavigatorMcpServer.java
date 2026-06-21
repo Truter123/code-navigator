@@ -3,6 +3,7 @@ package com.codenavigator.mcp;
 import com.codenavigator.briefing.BriefingGenerator;
 import com.codenavigator.cli.ProjectPaths;
 import com.codenavigator.domain.DomainToolHandlers;
+import com.codenavigator.embedding.EmbeddingProvider;
 import com.codenavigator.export.ExportService;
 import com.codenavigator.graph.*;
 import com.codenavigator.search.SearchService;
@@ -27,14 +28,17 @@ public class CodeNavigatorMcpServer {
     private final GraphTraversal traversal;
     private final SearchService searchService;
     private final DomainToolHandlers domainHandlers;
+    private final EmbeddingProvider embeddingProvider;
     private final ExportService exportService = new ExportService();
     private final Map<String, GraphStore> projectStores = new HashMap<>();
 
-    public CodeNavigatorMcpServer(GraphStore store, GraphTraversal traversal, SearchService searchService, DomainToolHandlers domainHandlers) {
+    public CodeNavigatorMcpServer(GraphStore store, GraphTraversal traversal, SearchService searchService,
+                                  DomainToolHandlers domainHandlers, EmbeddingProvider embeddingProvider) {
         this.store = store;
         this.traversal = traversal;
         this.searchService = searchService;
         this.domainHandlers = domainHandlers;
+        this.embeddingProvider = embeddingProvider;
     }
 
     public void start() {
@@ -368,7 +372,7 @@ public class CodeNavigatorMcpServer {
     String handleCgSearch(Map<String, Object> args) {
         var resolvedStore = resolveStore(args);
         var resolvedSearch = resolvedStore == store ? searchService
-            : new SearchService(resolvedStore, new GraphTraversal(resolvedStore));
+            : new SearchService(resolvedStore, new GraphTraversal(resolvedStore), embeddingProvider);
         String query = (String) args.get("query");
         var nodes = resolvedSearch.search(query);
         if (nodes.isEmpty()) return "No results for query: " + query;

@@ -2,6 +2,7 @@ package com.codenavigator.mcp;
 
 import com.codenavigator.domain.DomainSqliteStore;
 import com.codenavigator.domain.DomainToolHandlers;
+import com.codenavigator.embedding.NoopEmbeddingProvider;
 import com.codenavigator.graph.*;
 import com.codenavigator.search.SearchService;
 import org.junit.jupiter.api.*;
@@ -24,7 +25,7 @@ class CodeNavigatorMcpServerTest {
         var traversal = new GraphTraversal(store);
         var search = new SearchService(store, traversal);
         var domainHandlers = new DomainToolHandlers(new DomainSqliteStore(tempDir.resolve("domain.db")), null);
-        mcpServer = new CodeNavigatorMcpServer(store, traversal, search, domainHandlers);
+        mcpServer = new CodeNavigatorMcpServer(store, traversal, search, domainHandlers, new NoopEmbeddingProvider());
         buildTestGraph();
     }
 
