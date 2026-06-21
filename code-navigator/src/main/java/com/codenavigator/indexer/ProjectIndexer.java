@@ -23,9 +23,15 @@ public class ProjectIndexer {
     private final TypeScriptIndexer tsIndexer;
     private final MethodExtractor methodExtractor;
     private final DependencyParser dependencyParser;
+    private final com.codenavigator.embedding.EmbeddingProvider embeddingProvider;
 
     public ProjectIndexer(GraphStore store) {
+        this(store, new com.codenavigator.embedding.NoopEmbeddingProvider());
+    }
+
+    public ProjectIndexer(GraphStore store, com.codenavigator.embedding.EmbeddingProvider embeddingProvider) {
         this.store = store;
+        this.embeddingProvider = embeddingProvider;
         this.projectDetector = new ProjectDetector();
         this.tsIndexer = new TypeScriptIndexer();
         this.methodExtractor = new MethodExtractor();
@@ -67,6 +73,7 @@ public class ProjectIndexer {
                             node.qualifiedName(), node.filePath(), node.lineNumber(),
                             node.codeSnippet(), lastModified);
                     store.saveNode(nodeWithTime);
+                    embedNode(nodeWithTime);
                 }
             } catch (Exception e) {
                 // Skip unparseable files
@@ -93,6 +100,7 @@ public class ProjectIndexer {
             var nodes = tsIndexer.indexFile(file);
             for (Node node : nodes) {
                 store.saveNode(node);
+                embedNode(node);
             }
         }
 
@@ -175,6 +183,7 @@ public class ProjectIndexer {
                             node.qualifiedName(), node.filePath(), node.lineNumber(),
                             node.codeSnippet(), currentModified);
                     store.saveNode(nodeWithTime);
+                    embedNode(nodeWithTime);
                 }
 
                 // Re-extract methods for this file's nodes
@@ -201,6 +210,7 @@ public class ProjectIndexer {
                 var nodes = tsIndexer.indexFile(file);
                 for (Node node : nodes) {
                     store.saveNode(node);
+                    embedNode(node);
                 }
             } catch (Exception e) {
                 // Skip
@@ -344,6 +354,20 @@ public class ProjectIndexer {
     private static void configureParser() {
         StaticJavaParser.getParserConfiguration()
                 .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17);
+    }
+
+    /** Embeds a node's text and stores the vector. Failures never break indexing. */
+    private void embedNode(Node node) {
+        try {
+            String text = node.name() + " " + node.qualifiedName()
+                + (node.codeSnippet() != null ? " " + node.codeSnippet() : "");
+            float[] vec = embeddingProvider.embed(text);
+            if (vec.length > 0) {
+                store.upsertEmbedding(node.id(), vec);
+            }
+        } catch (Exception e) {
+            // Embedding failures must never break indexing
+        }
     }
 
     private String computeChecksum(Path file) {

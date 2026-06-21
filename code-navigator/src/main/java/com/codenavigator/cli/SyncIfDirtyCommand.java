@@ -31,7 +31,7 @@ public class SyncIfDirtyCommand implements Runnable {
 
             var dbPath = ProjectPaths.graphDb(root);
             try (var store = new GraphStore(dbPath)) {
-                var indexer = new ProjectIndexer(store);
+                var indexer = new ProjectIndexer(store, com.codenavigator.embedding.EmbeddingProviders.fromEnv());
                 indexer.indexIncremental(root);
             }
 
