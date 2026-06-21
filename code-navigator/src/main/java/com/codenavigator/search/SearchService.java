@@ -70,4 +70,20 @@ public class SearchService {
             .distinct()
             .collect(Collectors.toList());
     }
+
+    /**
+     * Cosine similarity between two float vectors.
+     * Returns 0.0 if either is empty or they have different dimensions.
+     */
+    static float cosine(float[] a, float[] b) {
+        if (a.length == 0 || b.length == 0 || a.length != b.length) return 0.0f;
+        double dot = 0, normA = 0, normB = 0;
+        for (int i = 0; i < a.length; i++) {
+            dot   += a[i] * b[i];
+            normA += a[i] * a[i];
+            normB += b[i] * b[i];
+        }
+        double denom = Math.sqrt(normA) * Math.sqrt(normB);
+        return denom == 0.0 ? 0.0f : (float) (dot / denom);
+    }
 }
