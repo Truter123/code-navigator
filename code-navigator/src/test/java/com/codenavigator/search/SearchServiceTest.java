@@ -112,4 +112,27 @@ class SearchServiceTest {
         var nodes = hybrid.contextSearch("where does request authentication happen");
         assertThat(nodes).extracting(Node::name).contains("LoginValidator");
     }
+
+    @Test
+    void recallAtK_hybridFindsSynonymTargetThatFtsOnlyMisses() {
+        // Target shares NO query token, so FTS-only cannot find it.
+        store.saveNode(new Node("com.CredentialChecker", NodeType.SERVICE,
+            "CredentialChecker", "com.CredentialChecker", "Cred.java", 1, "verifies password", 0));
+        store.upsertEmbedding("com.CredentialChecker", new float[]{0.0f, 1.0f});
+        // A distractor with a different vector.
+        store.saveNode(new Node("com.Unrelated", NodeType.SERVICE,
+            "Unrelated", "com.Unrelated", "U.java", 1, "does other things", 0));
+        store.upsertEmbedding("com.Unrelated", new float[]{1.0f, 0.0f});
+
+        // FTS-only finds nothing for "authentication".
+        var ftsOnly = new SearchService(store, new GraphTraversal(store));
+        assertThat(ftsOnly.search("authentication")).extracting(Node::name)
+            .doesNotContain("CredentialChecker");
+
+        // Hybrid: query vector aligned with CredentialChecker -> top-k contains it.
+        EmbeddingProvider fake = text -> new float[]{0.0f, 1.0f};
+        var hybrid = new SearchService(store, new GraphTraversal(store), fake);
+        var topK = hybrid.search("authentication").stream().limit(3).map(Node::name).toList();
+        assertThat(topK).contains("CredentialChecker");
+    }
 }

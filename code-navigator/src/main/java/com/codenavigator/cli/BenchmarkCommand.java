@@ -60,7 +60,16 @@ public class BenchmarkCommand implements Runnable {
             var traversal = new GraphTraversal(store);
             var runner = new BenchmarkRunner(store, traversal, tempDir, new TokenEstimator(), projectPath);
 
-            List<BenchmarkRow> rows = runner.run();
+            List<BenchmarkRow> rows = new java.util.ArrayList<>(runner.run());
+
+            // Probe: only add the semantic-context row when an embedding backend responds.
+            var provider = com.codenavigator.embedding.EmbeddingProviders.fromEnv();
+            if (provider.embed("probe").length > 0) {
+                var search = new com.codenavigator.search.SearchService(store, traversal, provider);
+                rows.add(runner.runSemanticContext(search, "where does request validation happen"));
+            } else {
+                System.err.println("(semantic-context scenario skipped: embeddings off or backend unreachable)");
+            }
 
             String table = new MarkdownTableRenderer().render(rows);
             System.out.println(table);

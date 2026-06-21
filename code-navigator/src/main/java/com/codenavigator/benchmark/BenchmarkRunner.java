@@ -5,6 +5,7 @@ import com.codenavigator.export.ExportService;
 import com.codenavigator.graph.GraphStore;
 import com.codenavigator.graph.GraphTraversal;
 import com.codenavigator.graph.Node;
+import com.codenavigator.search.SearchService;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -57,6 +58,35 @@ public class BenchmarkRunner {
         rows.add(runSymbolImpact());
         rows.add(runCompactExport());
         return rows;
+    }
+
+    /**
+     * Optional 4th scenario: tokens to answer a natural-language query.
+     * Baseline = raw content of files for the keyword (FTS) hits;
+     * Navigator = compact hybrid cg_context listing for the same query.
+     * Only meaningful when embeddings are enabled (caller decides whether to invoke).
+     */
+    public BenchmarkRow runSemanticContext(SearchService hybridSearch, String query) {
+        // Baseline: files surfaced by keyword search alone, read raw.
+        List<String> keywordFiles = new ArrayList<>();
+        for (String kw : hybridSearch.extractKeywords(query)) {
+            for (Node n : store.searchFts(kw + "*")) {
+                if (!keywordFiles.contains(n.filePath())) keywordFiles.add(n.filePath());
+            }
+        }
+        int baselineTokens = estimator.estimate(readFiles(keywordFiles));
+
+        // Navigator: compact hybrid context listing.
+        List<Node> ctx = hybridSearch.contextSearch(query);
+        StringBuilder sb = new StringBuilder();
+        sb.append("## Context for: ").append(query).append("\n\n");
+        for (Node n : ctx) {
+            sb.append("- ").append(n.type()).append(" ").append(n.name())
+              .append(" (").append(n.filePath()).append(")\n");
+        }
+        int navigatorTokens = estimator.estimate(sb.toString());
+
+        return makeRow("semantic-context", baselineTokens, navigatorTokens);
     }
 
     // ---- Scenario 1: whole-project ----
