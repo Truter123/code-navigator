@@ -19,6 +19,7 @@ public class SearchService {
     );
 
     private static final int SEMANTIC_SEED_LIMIT = 10;
+    private static final int VECTOR_TOP_K = 20;
 
     private final GraphStore store;
     private final GraphTraversal traversal;
@@ -56,7 +57,9 @@ public class SearchService {
             return new ArrayList<>(ftsOrdered.values()); // original behaviour
         }
 
-        List<String> vecRanked = vectorRank(queryVec);
+        List<String> vecRanked = vectorRank(queryVec).stream()
+            .limit(VECTOR_TOP_K)
+            .collect(Collectors.toList());
         List<String> ftsRanked = new ArrayList<>(ftsOrdered.keySet());
         List<String> fused = rrf(60, ftsRanked, vecRanked);
 

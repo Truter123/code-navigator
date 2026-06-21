@@ -153,4 +153,20 @@ class SearchServiceTest {
         assertThat(names).contains("DimMatch");           // matching-dim vector surfaces
         assertThat(names).doesNotContain("DimMismatch");  // mismatched-dim vector silently ignored (cosine==0)
     }
+
+    @Test
+    void search_capsVectorOnlyResultsAtTopK() {
+        // 25 vector-aligned nodes, none matching the FTS query text -> pure vector branch.
+        for (int i = 0; i < 25; i++) {
+            String id = "com.Vec" + i;
+            store.saveNode(new Node(id, NodeType.SERVICE, "Vec" + i, id, "V" + i + ".java", 1, "vector node", 0));
+            store.upsertEmbedding(id, new float[]{1.0f, 0.0f});
+        }
+        EmbeddingProvider fake = text -> new float[]{1.0f, 0.0f};
+        var hybrid = new SearchService(store, new GraphTraversal(store), fake);
+
+        // No FTS hit -> results come only from the (capped) vector branch.
+        var results = hybrid.search("zzznomatchterm");
+        assertThat(results).hasSize(20);  // VECTOR_TOP_K, not all 25
+    }
 }
