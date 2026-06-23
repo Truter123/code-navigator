@@ -33,6 +33,8 @@ dependencies {
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
     implementation 'info.picocli:picocli:4.7.6'
     implementation 'org.eclipse.jgit:org.eclipse.jgit:7.2.0.202503040940-r'
+    implementation 'com.dylibso.chicory:runtime:1.5.1'
+    implementation 'at.released.weh:bindings-chicory-emscripten-jvm:0.6.0'
     // Explicit no-op SLF4J binding: silences "No SLF4J providers were found" and,
     // critically, prevents any transitive logger from writing to stdout (the MCP
     // stdio transport uses stdout for JSON-RPC — log output there corrupts the protocol).
