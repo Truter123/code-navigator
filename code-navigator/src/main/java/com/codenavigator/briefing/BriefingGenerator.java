@@ -428,15 +428,15 @@ public class BriefingGenerator {
 
     private static final Pattern FE_FIELD_PATTERN = Pattern.compile(
         "(\\w+)\\s*[?!]?\\s*:\\s*([\\w<>\\[\\]|, ]+)");
-    private static final Pattern FE_ENUM_VALUE_PATTERN = Pattern.compile(
-        "(\\w+)\\s*[,=\\n]");
+    private static final Pattern ENUM_MEMBER_PATTERN = Pattern.compile("^(\\w+)");
     private static final Pattern SELECTOR_PATTERN = Pattern.compile(
         "selector:\\s*['\"]([^'\"]+)['\"]");
 
     private static List<String> extractTsFields(String snippet) {
         var out = new ArrayList<String>();
-        if (snippet == null) return out;
-        Matcher m = FE_FIELD_PATTERN.matcher(snippet);
+        String body = braceBody(snippet);
+        if (body == null) return out;
+        Matcher m = FE_FIELD_PATTERN.matcher(body);
         while (m.find()) {
             out.add(m.group(1) + ": " + m.group(2).trim());
         }
@@ -445,15 +445,33 @@ public class BriefingGenerator {
 
     private static List<String> extractEnumValues(String snippet) {
         var out = new ArrayList<String>();
-        if (snippet == null) return out;
-        Matcher m = FE_ENUM_VALUE_PATTERN.matcher(snippet);
-        while (m.find()) {
-            String token = m.group(1);
-            if (!token.equals("export") && !token.equals("enum")) {
-                out.add(token);
+        String body = braceBody(snippet);
+        if (body == null) return out;
+        for (String part : body.split("[,\\n]")) {
+            Matcher m = ENUM_MEMBER_PATTERN.matcher(part.trim());
+            if (m.find()) {
+                out.add(m.group(1));
             }
         }
         return out;
+    }
+
+    /** Content between the first '{' and its balanced '}' (or the rest if the snippet is truncated). */
+    private static String braceBody(String snippet) {
+        if (snippet == null) return null;
+        int open = snippet.indexOf('{');
+        if (open < 0) return null;
+        int depth = 0;
+        for (int i = open; i < snippet.length(); i++) {
+            char c = snippet.charAt(i);
+            if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0) return snippet.substring(open + 1, i);
+            }
+        }
+        return snippet.substring(open + 1);
     }
 
     private static String extractSelector(String snippet) {

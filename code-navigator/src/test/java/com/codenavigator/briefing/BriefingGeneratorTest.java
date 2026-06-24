@@ -171,6 +171,20 @@ class BriefingGeneratorTest {
     }
 
     @Test
+    void enumValuesAreBoundedToEnumBody() throws IOException {
+        // The snippet bleeds into a following declaration (as buildSnippet does in a
+        // multi-construct file); extraction must stay within the enum's own braces.
+        store.saveNode(new Node("E", NodeType.FE_ENUM, "E", "E", "x.ts", 1,
+            "export enum E { A, B }\nexport const C = 1;\n", 0));
+
+        new BriefingGenerator(store, null).generate(outputDir);
+
+        String content = Files.readString(outputDir.resolve("models.md"));
+        assertThat(content).contains("values: A, B");
+        assertThat(content).doesNotContain("A, B, C");
+    }
+
+    @Test
     void componentsFileShowsSelector() throws IOException {
         store.saveNode(new Node("WidgetComponent", NodeType.FE_COMPONENT, "WidgetComponent", "WidgetComponent",
             "widget.component.ts", 1,
