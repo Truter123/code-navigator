@@ -13,6 +13,9 @@ public enum NodeType {
     PROJECTION_HANDLER, EVENT_LISTENER,
     // Frontend
     FE_SERVICE, FE_COMPONENT, FE_MODEL,
+    // Frontend (extended) + scripts
+    FE_CLASS, FE_ENUM, FE_PIPE, FE_GUARD, FE_INTERCEPTOR, FE_VALIDATOR, FE_CONSTANT,
+    GROOVY_SCRIPT,
     // External
     LIBRARY
 }
