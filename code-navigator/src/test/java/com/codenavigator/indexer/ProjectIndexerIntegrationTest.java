@@ -90,6 +90,27 @@ class ProjectIndexerIntegrationTest {
     }
 
     @Test
+    void indexesGroovyScriptsAlongsideJava() throws Exception {
+        var proj = tempDir.resolve("mixed-proj");
+        var javaDir = proj.resolve("src/main/java/com/demo");
+        Files.createDirectories(javaDir);
+        Files.writeString(javaDir.resolve("Foo.java"), """
+            package com.demo;
+            public class Foo {}
+            """);
+        var cicd = proj.resolve("cicd");
+        Files.createDirectories(cicd);
+        Files.writeString(cicd.resolve("Jenkinsfile.groovy"), "node {\n  echo 'building'\n}\n");
+
+        indexer.indexFull(proj);
+
+        var scripts = store.findNodesByType(NodeType.GROOVY_SCRIPT);
+        assertThat(scripts).extracting("name").contains("Jenkinsfile");
+        // Java path is unaffected:
+        assertThat(store.getAllNodes()).extracting("name").contains("Foo");
+    }
+
+    @Test
     void indexFullCreatesLibraryNodesForSpringDependencies() throws Exception {
         // Self-contained project: a build.gradle declaring Spring + a controller that
         // imports a Spring type. The indexer should mint a LIBRARY node for that import.

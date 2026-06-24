@@ -21,6 +21,7 @@ public class ProjectIndexer {
     private final GraphStore store;
     private final ProjectDetector projectDetector;
     private final TypeScriptIndexer tsIndexer;
+    private final GroovyIndexer groovyIndexer;
     private final MethodExtractor methodExtractor;
     private final DependencyParser dependencyParser;
     private final com.codenavigator.embedding.EmbeddingProvider embeddingProvider;
@@ -34,6 +35,7 @@ public class ProjectIndexer {
         this.embeddingProvider = embeddingProvider;
         this.projectDetector = new ProjectDetector();
         this.tsIndexer = new TypeScriptIndexer();
+        this.groovyIndexer = new GroovyIndexer();
         this.methodExtractor = new MethodExtractor();
         this.dependencyParser = new DependencyParser();
     }
@@ -60,6 +62,7 @@ public class ProjectIndexer {
         // 2. Find all files
         List<Path> javaFiles = findJavaFiles(projectPath);
         List<Path> tsFiles = findTsFiles(projectPath);
+        List<Path> groovyFiles = findGroovyFiles(projectPath);
 
         // 3. Phase 1: Extract nodes from Java files
         for (Path file : javaFiles) {
@@ -104,12 +107,21 @@ public class ProjectIndexer {
             }
         }
 
+        // 4b. Phase 1d: Extract nodes from Groovy files (CI/CD scripts; no edges)
+        for (Path file : groovyFiles) {
+            var nodes = groovyIndexer.indexFile(file);
+            for (Node node : nodes) {
+                store.saveNode(node);
+                embedNode(node);
+            }
+        }
+
         // 5. Phase 2: Extract edges
         extractAndSaveEdges(javaFiles, projectPath, edgeExtractor);
         extractFeEdges();
 
         // 6. Track indexed files
-        trackFiles(projectPath, javaFiles, tsFiles);
+        trackFiles(projectPath, javaFiles, tsFiles, groovyFiles);
 
         // 7. Mine git co-change coupling (silently skipped if not a git repo)
         new GitHistoryAnalyzer(store).analyze(projectPath, 500);
@@ -131,10 +143,12 @@ public class ProjectIndexer {
         // 2. Find all files
         List<Path> javaFiles = findJavaFiles(projectPath);
         List<Path> tsFiles = findTsFiles(projectPath);
+        List<Path> groovyFiles = findGroovyFiles(projectPath);
 
         // 3. Re-index changed files
         boolean anyChanged = reindexChangedJavaFiles(javaFiles, projectPath, nodeExtractor);
         anyChanged |= reindexChangedTsFiles(tsFiles);
+        anyChanged |= reindexChangedGroovyFiles(groovyFiles);
 
         // 4. Full edge re-extraction if anything changed
         if (anyChanged) {
@@ -144,7 +158,7 @@ public class ProjectIndexer {
         }
 
         // 5. Update tracked files
-        trackFiles(projectPath, javaFiles, tsFiles);
+        trackFiles(projectPath, javaFiles, tsFiles, groovyFiles);
     }
 
     // ---- Shared extraction helpers ----
@@ -208,6 +222,26 @@ public class ProjectIndexer {
                 anyChanged = true;
                 store.deleteNodesByFilePath(filePath);
                 var nodes = tsIndexer.indexFile(file);
+                for (Node node : nodes) {
+                    store.saveNode(node);
+                    embedNode(node);
+                }
+            } catch (Exception e) {
+                // Skip
+            }
+        }
+        return anyChanged;
+    }
+
+    private boolean reindexChangedGroovyFiles(List<Path> groovyFiles) {
+        boolean anyChanged = false;
+        for (Path file : groovyFiles) {
+            var filePath = file.toString();
+            try {
+                if (!isFileChanged(file, filePath)) continue;
+                anyChanged = true;
+                store.deleteNodesByFilePath(filePath);
+                var nodes = groovyIndexer.indexFile(file);
                 for (Node node : nodes) {
                     store.saveNode(node);
                     embedNode(node);
@@ -298,8 +332,14 @@ public class ProjectIndexer {
             return name.endsWith(".ts")
                     && !name.endsWith(".spec.ts")
                     && !name.endsWith(".d.ts")
+                    && !name.endsWith(".module.ts")
                     && !name.contains("node_modules");
         });
+    }
+
+    private List<Path> findGroovyFiles(Path projectPath) {
+        return findFiles(projectPath, file ->
+                file.toString().endsWith(".groovy") && !isExcluded(file));
     }
 
     private List<Path> findFiles(Path projectPath, Predicate<Path> filter) {
@@ -327,11 +367,15 @@ public class ProjectIndexer {
 
     // ---- File tracking ----
 
-    private void trackFiles(Path projectPath, List<Path> javaFiles, List<Path> tsFiles) {
+    private void trackFiles(Path projectPath, List<Path> javaFiles, List<Path> tsFiles,
+                            List<Path> groovyFiles) {
         for (Path file : javaFiles) {
             trackFile(projectPath, file);
         }
         for (Path file : tsFiles) {
+            trackFile(projectPath, file);
+        }
+        for (Path file : groovyFiles) {
             trackFile(projectPath, file);
         }
     }
