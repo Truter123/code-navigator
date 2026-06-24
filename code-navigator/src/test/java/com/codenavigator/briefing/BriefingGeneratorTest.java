@@ -151,4 +151,70 @@ class BriefingGeneratorTest {
         assertThat(content).contains("OrderPageComponent");
         assertThat(content).contains("OrderFeService");
     }
+
+    @Test
+    void modelsFileShowsFeClassFieldsAndEnumValues() throws IOException {
+        store.saveNode(new Node("Beneficiary", NodeType.FE_CLASS, "Beneficiary", "Beneficiary",
+            "beneficiary.ts", 1,
+            "export class Beneficiary {\n  type: BeneficiaryType;\n  allocation: number;\n  name: string;\n}", 0));
+        store.saveNode(new Node("BeneficiaryType", NodeType.FE_ENUM, "BeneficiaryType", "BeneficiaryType",
+            "beneficiary-type.ts", 1,
+            "export enum BeneficiaryType {\n  PERSON,\n  ORGANIZATION\n}", 0));
+
+        new BriefingGenerator(store, null).generate(outputDir);
+
+        String content = Files.readString(outputDir.resolve("models.md"));
+        assertThat(content).contains("Beneficiary (FE_CLASS)");
+        assertThat(content).contains("name: string");
+        assertThat(content).contains("BeneficiaryType (FE_ENUM)");
+        assertThat(content).contains("values: PERSON, ORGANIZATION");
+    }
+
+    @Test
+    void componentsFileShowsSelector() throws IOException {
+        store.saveNode(new Node("WidgetComponent", NodeType.FE_COMPONENT, "WidgetComponent", "WidgetComponent",
+            "widget.component.ts", 1,
+            "@Component({\n  selector: 'app-widget',\n})\nexport class WidgetComponent {}", 0));
+
+        new BriefingGenerator(store, null).generate(outputDir);
+
+        String content = Files.readString(outputDir.resolve("components.md"));
+        assertThat(content).contains("WidgetComponent");
+        assertThat(content).contains("app-widget");
+    }
+
+    @Test
+    void servicesFileAppendsFrontendTypes() throws IOException {
+        store.saveNode(new Node("MoneyPipe", NodeType.FE_PIPE, "MoneyPipe", "MoneyPipe", "money.pipe.ts", 1, "", 0));
+        store.saveNode(new Node("AuthGuard", NodeType.FE_GUARD, "AuthGuard", "AuthGuard", "auth.guard.ts", 1, "", 0));
+        store.saveNode(new Node("ApiInterceptor", NodeType.FE_INTERCEPTOR, "ApiInterceptor", "ApiInterceptor",
+            "api.interceptor.ts", 1, "", 0));
+
+        new BriefingGenerator(store, null).generate(outputDir);
+
+        String content = Files.readString(outputDir.resolve("services.md"));
+        assertThat(content).contains("MoneyPipe");
+        assertThat(content).contains("AuthGuard");
+        assertThat(content).contains("ApiInterceptor");
+    }
+
+    @Test
+    void generatesOtherFileForValidatorsConstantsScripts() throws IOException {
+        store.saveNode(new Node("phoneValidator", NodeType.FE_VALIDATOR, "phoneValidator", "phoneValidator",
+            "phone.validator.ts", 1, "", 0));
+        store.saveNode(new Node("PEP_INFO_MESSAGE", NodeType.FE_CONSTANT, "PEP_INFO_MESSAGE", "PEP_INFO_MESSAGE",
+            "pep-info-message.const.ts", 1, "", 0));
+        store.saveNode(new Node("Jenkinsfile", NodeType.GROOVY_SCRIPT, "Jenkinsfile", "Jenkinsfile",
+            "cicd/Jenkinsfile.groovy", 1, "", 0));
+
+        new BriefingGenerator(store, null).generate(outputDir);
+
+        String content = Files.readString(outputDir.resolve("other.md"));
+        assertThat(content).contains("FE_VALIDATOR");
+        assertThat(content).contains("phoneValidator");
+        assertThat(content).contains("FE_CONSTANT");
+        assertThat(content).contains("PEP_INFO_MESSAGE");
+        assertThat(content).contains("GROOVY_SCRIPT");
+        assertThat(content).contains("Jenkinsfile");
+    }
 }

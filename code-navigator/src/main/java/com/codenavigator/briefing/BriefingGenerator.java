@@ -32,6 +32,7 @@ public class BriefingGenerator {
         writeFile(outputDir, "services.md", generateServices());
         writeFile(outputDir, "components.md", generateComponents());
         writeFile(outputDir, "projections.md", generateProjections());
+        writeFile(outputDir, "other.md", generateOther());
         if (domainStore != null) {
             writeFile(outputDir, "domain.md", generateDomain());
             writeFile(outputDir, "flows.md", generateFlows());
@@ -117,71 +118,129 @@ public class BriefingGenerator {
     }
 
     private String generateModels() {
+        var sb = new StringBuilder();
+
+        // Java records / commands / queries (fields from method-records)
         var records = new ArrayList<>(store.findNodesByType(NodeType.RECORD));
         records.addAll(store.findNodesByType(NodeType.COMMAND));
         records.addAll(store.findNodesByType(NodeType.QUERY));
-        if (records.isEmpty()) return null;
+        if (!records.isEmpty()) {
+            var recordIds = records.stream().map(Node::id).toList();
+            var fieldsByNode = store.findMethodsByNodeIds(recordIds).stream()
+                .filter(m -> "field".equals(m.visibility()))
+                .collect(Collectors.groupingBy(GraphStore.MethodRecord::nodeId));
+            var byPackage = records.stream()
+                .filter(r -> fieldsByNode.containsKey(r.id()))
+                .collect(Collectors.groupingBy(
+                    r -> extractPackage(r.qualifiedName()), LinkedHashMap::new, Collectors.toList()));
+            for (var entry : byPackage.entrySet()) {
+                sb.append("## ").append(entry.getKey()).append("\n");
+                for (var record : entry.getValue()) {
+                    var fields = fieldsByNode.get(record.id());
+                    if (fields == null || fields.isEmpty()) continue;
+                    String fieldStr = fields.stream()
+                        .map(f -> f.name() + ": " + f.returnType())
+                        .collect(Collectors.joining(", "));
+                    sb.append("- **").append(record.name()).append("**: ").append(fieldStr).append("\n");
+                }
+                sb.append("\n");
+            }
+        }
 
-        var recordIds = records.stream().map(Node::id).toList();
-        var allFields = store.findMethodsByNodeIds(recordIds);
-        var fieldsByNode = allFields.stream()
-            .filter(m -> "field".equals(m.visibility()))
-            .collect(Collectors.groupingBy(GraphStore.MethodRecord::nodeId));
+        // Frontend classes / models / enums (fields parsed from the code snippet)
+        appendFeModels(sb);
 
-        if (fieldsByNode.isEmpty()) return null;
+        return sb.isEmpty() ? null : "# Models\n\n" + sb;
+    }
 
-        var byPackage = records.stream()
-            .filter(r -> fieldsByNode.containsKey(r.id()))
-            .collect(Collectors.groupingBy(
-                r -> extractPackage(r.qualifiedName()), LinkedHashMap::new, Collectors.toList()));
-
-        var sb = new StringBuilder();
-        sb.append("# Models\n\n");
-
-        for (var entry : byPackage.entrySet()) {
-            sb.append("## ").append(entry.getKey()).append("\n");
-            for (var record : entry.getValue()) {
-                var fields = fieldsByNode.get(record.id());
-                if (fields == null || fields.isEmpty()) continue;
-                String fieldStr = fields.stream()
-                    .map(f -> f.name() + ": " + f.returnType())
-                    .collect(Collectors.joining(", "));
-                sb.append("- **").append(record.name()).append("**: ").append(fieldStr).append("\n");
+    private void appendFeModels(StringBuilder sb) {
+        var feClasses = new ArrayList<>(store.findNodesByType(NodeType.FE_CLASS));
+        feClasses.addAll(store.findNodesByType(NodeType.FE_MODEL));
+        for (var node : feClasses) {
+            var fields = extractTsFields(node.codeSnippet());
+            if (fields.isEmpty()) continue;
+            sb.append("## ").append(node.name()).append(" (").append(node.type().name()).append(")\n");
+            for (var field : fields) {
+                sb.append("   ").append(field).append("\n");
             }
             sb.append("\n");
         }
-        return sb.toString();
+        for (var node : store.findNodesByType(NodeType.FE_ENUM)) {
+            var values = extractEnumValues(node.codeSnippet());
+            values.remove(node.name());
+            sb.append("## ").append(node.name()).append(" (FE_ENUM)\n");
+            if (!values.isEmpty()) {
+                sb.append("   values: ").append(String.join(", ", values)).append("\n");
+            }
+            sb.append("\n");
+        }
     }
 
     private String generateServices() {
-        var services = store.findNodesByType(NodeType.SERVICE);
-        if (services.isEmpty()) return null;
-
-        var serviceIds = services.stream().map(Node::id).toList();
-        var allMethods = store.findMethodsByNodeIds(serviceIds);
-        var methodsByNode = allMethods.stream()
-            .filter(m -> "public".equals(m.visibility()))
-            .collect(Collectors.groupingBy(GraphStore.MethodRecord::nodeId));
-
-        if (methodsByNode.isEmpty()) return null;
-
         var sb = new StringBuilder();
-        sb.append("# Services\n\n");
 
-        for (var svc : services) {
-            var methods = methodsByNode.get(svc.id());
-            if (methods == null || methods.isEmpty()) continue;
-            sb.append("## ").append(svc.name()).append("\n");
-            for (var method : methods) {
-                sb.append("  ").append(method.name()).append("(");
-                if (method.parameters() != null && !method.parameters().isEmpty()) {
-                    sb.append(method.parameters());
+        // Java services (public methods)
+        var services = store.findNodesByType(NodeType.SERVICE);
+        if (!services.isEmpty()) {
+            var serviceIds = services.stream().map(Node::id).toList();
+            var methodsByNode = store.findMethodsByNodeIds(serviceIds).stream()
+                .filter(m -> "public".equals(m.visibility()))
+                .collect(Collectors.groupingBy(GraphStore.MethodRecord::nodeId));
+            for (var svc : services) {
+                var methods = methodsByNode.get(svc.id());
+                if (methods == null || methods.isEmpty()) continue;
+                sb.append("## ").append(svc.name()).append("\n");
+                for (var method : methods) {
+                    sb.append("  ").append(method.name()).append("(");
+                    if (method.parameters() != null && !method.parameters().isEmpty()) {
+                        sb.append(method.parameters());
+                    }
+                    sb.append(") -> ").append(method.returnType() != null ? method.returnType() : "void").append("\n");
                 }
-                sb.append(") -> ").append(method.returnType() != null ? method.returnType() : "void").append("\n");
+                sb.append("\n");
+            }
+        }
+
+        // Frontend services / pipes / guards / interceptors (no extracted methods → name + file)
+        appendFeNodeList(sb, "Frontend Services", NodeType.FE_SERVICE);
+        appendFeNodeList(sb, "Pipes", NodeType.FE_PIPE);
+        appendFeNodeList(sb, "Guards", NodeType.FE_GUARD);
+        appendFeNodeList(sb, "Interceptors", NodeType.FE_INTERCEPTOR);
+
+        return sb.isEmpty() ? null : "# Services\n\n" + sb;
+    }
+
+    private void appendFeNodeList(StringBuilder sb, String heading, NodeType type) {
+        var nodes = store.findNodesByType(type);
+        if (nodes.isEmpty()) return;
+        sb.append("## ").append(heading).append("\n");
+        for (var node : nodes) {
+            sb.append("  ").append(node.name());
+            if (node.filePath() != null && !node.filePath().isEmpty()) {
+                sb.append(" — ").append(fileName(node.filePath()));
             }
             sb.append("\n");
         }
-        return sb.toString();
+        sb.append("\n");
+    }
+
+    private String generateOther() {
+        var sb = new StringBuilder();
+        appendOtherSection(sb, "FE_VALIDATOR", NodeType.FE_VALIDATOR);
+        appendOtherSection(sb, "FE_CONSTANT", NodeType.FE_CONSTANT);
+        appendOtherSection(sb, "GROOVY_SCRIPT", NodeType.GROOVY_SCRIPT);
+        return sb.isEmpty() ? null : "# Other\n\n" + sb;
+    }
+
+    private void appendOtherSection(StringBuilder sb, String heading, NodeType type) {
+        var nodes = store.findNodesByType(type);
+        if (nodes.isEmpty()) return;
+        sb.append("## ").append(heading).append("\n");
+        for (var node : nodes) {
+            String file = node.filePath() != null && !node.filePath().isEmpty() ? fileName(node.filePath()) : "";
+            sb.append("   ").append(file).append(" — ").append(node.name()).append("\n");
+        }
+        sb.append("\n");
     }
 
     private String generateComponents() {
@@ -192,12 +251,16 @@ public class BriefingGenerator {
         sb.append("# Components\n\n");
 
         for (var comp : components) {
+            sb.append("## ").append(comp.name()).append("\n");
+
+            String selector = extractSelector(comp.codeSnippet());
+            if (selector != null) {
+                sb.append("  selector: ").append(selector).append("\n");
+            }
+
             var serviceEdges = store.findEdgesFrom(comp.id()).stream()
                 .filter(e -> e.type() == EdgeType.USES_SERVICE)
                 .toList();
-            if (serviceEdges.isEmpty()) continue;
-
-            sb.append("## ").append(comp.name()).append("\n");
             for (var edge : serviceEdges) {
                 var feService = store.findNodeById(edge.targetId());
                 String serviceName = feService.map(Node::name).orElse(edge.targetId());
@@ -361,6 +424,47 @@ public class BriefingGenerator {
         if (codeSnippet == null) return "/";
         Matcher m = BASE_PATH_PATTERN.matcher(codeSnippet);
         return m.find() ? m.group(1) : "/";
+    }
+
+    private static final Pattern FE_FIELD_PATTERN = Pattern.compile(
+        "(\\w+)\\s*[?!]?\\s*:\\s*([\\w<>\\[\\]|, ]+)");
+    private static final Pattern FE_ENUM_VALUE_PATTERN = Pattern.compile(
+        "(\\w+)\\s*[,=\\n]");
+    private static final Pattern SELECTOR_PATTERN = Pattern.compile(
+        "selector:\\s*['\"]([^'\"]+)['\"]");
+
+    private static List<String> extractTsFields(String snippet) {
+        var out = new ArrayList<String>();
+        if (snippet == null) return out;
+        Matcher m = FE_FIELD_PATTERN.matcher(snippet);
+        while (m.find()) {
+            out.add(m.group(1) + ": " + m.group(2).trim());
+        }
+        return out;
+    }
+
+    private static List<String> extractEnumValues(String snippet) {
+        var out = new ArrayList<String>();
+        if (snippet == null) return out;
+        Matcher m = FE_ENUM_VALUE_PATTERN.matcher(snippet);
+        while (m.find()) {
+            String token = m.group(1);
+            if (!token.equals("export") && !token.equals("enum")) {
+                out.add(token);
+            }
+        }
+        return out;
+    }
+
+    private static String extractSelector(String snippet) {
+        if (snippet == null) return null;
+        Matcher m = SELECTOR_PATTERN.matcher(snippet);
+        return m.find() ? m.group(1) : null;
+    }
+
+    private static String fileName(String path) {
+        int slash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+        return slash >= 0 ? path.substring(slash + 1) : path;
     }
 
     private static String extractPackage(String qualifiedName) {
