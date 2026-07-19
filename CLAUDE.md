@@ -11,12 +11,12 @@ Custom MCP server: **code-navigator**. Java 21 / Gradle project that produces a 
 ./jars/build-all.sh
 
 # Or directly
-cd code-navigator && ./gradlew shadowJar
+./gradlew shadowJar
 ```
 
 ## Project Structure
 
-- `code-navigator/` — Code navigator MCP server. Indexes Java codebases into a SQLite-backed graph (nodes: controllers, commands, handlers, aggregates, events, projections; edges: calls, handles, emits, etc.). 22 MCP tools: 16 `cg_*` tools for navigation, impact analysis, dead code detection, hotspot analysis, package dependencies, export, and compact index generation + 6 `dm_*` tools for domain knowledge (bounded contexts, entities, glossary, flows, rules).
+- `src/`, `build.gradle` — Code navigator MCP server (repo root is the Gradle project). Indexes Java codebases into a SQLite-backed graph (nodes: controllers, commands, handlers, aggregates, events, projections; edges: calls, handles, emits, etc.). 22 MCP tools: 16 `cg_*` tools for navigation, impact analysis, dead code detection, hotspot analysis, package dependencies, export, and compact index generation + 6 `dm_*` tools for domain knowledge (bounded contexts, entities, glossary, flows, rules).
 - `jars/` — Pre-built JAR, runner script, and auto-setup hook.
 
 ## MCP Server

@@ -1,9 +1,0 @@
-build/
-.gradle/
-*.iml
-.idea/
-out/
-
-# Claude Code config (symlinked to claude-config repo)
-.claude
-code-navigator.run

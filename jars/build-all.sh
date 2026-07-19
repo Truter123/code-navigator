@@ -9,7 +9,7 @@ echo "=== Building all MCP JARs ==="
 # code-navigator
 echo ""
 echo "Building code-navigator..."
-cd "$MCP_DIR/code-navigator"
+cd "$MCP_DIR"
 ./gradlew shadowJar -q
 cp build/libs/code-navigator-0.1.0.jar "$SCRIPT_DIR/code-navigator.jar"
 echo "  -> code-navigator.jar"

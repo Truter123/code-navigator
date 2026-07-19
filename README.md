@@ -62,7 +62,9 @@ A `SessionStart` hook (`jars/auto-setup.sh`) automatically:
 
 ```
 .
-├── code-navigator/       # Code navigator + domain MCP server (Java/Gradle)
+├── src/                  # Code navigator + domain MCP server source (Java)
+├── build.gradle          # Gradle build (repo root is the Gradle project)
+├── docs/                 # Plans and design specs
 ├── jars/                 # Built JAR, runner script, auto-setup
 │   ├── build-all.sh
 │   ├── run-code-navigator.sh
