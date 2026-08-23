@@ -18,7 +18,6 @@ import picocli.CommandLine.Command;
         SyncIfDirtyCommand.class,
         InstallCommand.class,
         ExportCommand.class,
-        BriefingCommand.class,
         BenchmarkCommand.class
     }
 )

@@ -1,7 +1,5 @@
 package com.codenavigator.mcp;
 
-import com.codenavigator.domain.DomainSqliteStore;
-import com.codenavigator.domain.model.*;
 import com.codenavigator.graph.*;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
@@ -15,22 +13,18 @@ class GuardReportBuilderTest {
 
     @TempDir Path tempDir;
     private GraphStore graphStore;
-    private DomainSqliteStore domainStore;
     private GraphTraversal traversal;
 
     @BeforeEach
     void setUp() {
         graphStore = new GraphStore(tempDir.resolve("graph.db"));
-        domainStore = new DomainSqliteStore(tempDir.resolve("domain.db"));
         traversal = new GraphTraversal(graphStore);
         buildCqrsGraph();
-        buildDomainFixtures();
     }
 
     @AfterEach
     void tearDown() {
         graphStore.close();
-        domainStore.close();
     }
 
     private void buildCqrsGraph() {
@@ -59,48 +53,42 @@ class GuardReportBuilderTest {
         graphStore.setConfig("tier", "DDD");
     }
 
-    private void buildDomainFixtures() {
-        domainStore.saveContext(new BoundedContext(
-            "Order Management", "Handles order lifecycle", "order-team",
-            List.of("Order", "OrderCreatedEvent", "CreateOrderCommand"),
-            List.of()
-        ));
-        domainStore.saveRule(new BusinessRule(
-            "order-minimum", "Order total must exceed $10",
-            "Order Management", "Order", Severity.ERROR,
-            "order.total >= 10.00"
-        ));
-        domainStore.saveRule(new BusinessRule(
-            "shipment-requires-payment",
-            "Order cannot be shipped if payment is pending",
-            "Order Management", "Order", Severity.ERROR,
-            "order.paymentStatus == CAPTURED"
-        ));
-    }
 
     @Test
     void build_containsBlastRadiusSection() {
-        var builder = new GuardReportBuilder(graphStore, traversal, domainStore);
+        var builder = new GuardReportBuilder(graphStore, traversal);
         var report = builder.build("com.Order", 2);
-        assertThat(report).contains("## Guard Report");
-        assertThat(report).contains("Blast Radius");
+        assertThat(report).contains("## Guard");
+        assertThat(report).contains("Blast radius");
+        // DDD-significant neighbours are named in full.
         assertThat(report).contains("OrderCreatedEvent");
         assertThat(report).contains("CreateOrderCommandHandler");
     }
 
+
     @Test
-    void build_groupsDddNodeTypes() {
-        var builder = new GuardReportBuilder(graphStore, traversal, domainStore);
+    void build_summarisesNonSignificantNodesRatherThanListingThem() {
+        var builder = new GuardReportBuilder(graphStore, traversal);
         var report = builder.build("com.Order", 2);
-        assertThat(report).contains("### AGGREGATE");
-        assertThat(report).contains("### DOMAIN_EVENT");
-        assertThat(report).contains("### PROJECTION_HANDLER");
-        assertThat(report).contains("### COMMAND_HANDLER");
+        assertThat(report).contains("DDD-significant");
+        assertThat(report).contains("Full list: cg_impact");
+    }
+
+    @Test
+    void build_countsTestSourcesSeparately() {
+        graphStore.saveNode(new Node("com.OrderTest", NodeType.CLASS, "OrderTest",
+            "com.OrderTest", "src/test/java/com/OrderTest.java", 1, "class OrderTest", 0));
+        graphStore.saveEdge(new Edge("t1", EdgeType.CALLS_METHOD, "com.OrderTest", "com.Order"));
+
+        var builder = new GuardReportBuilder(graphStore, traversal);
+        var report = builder.build("com.Order", 1);
+
+        assertThat(report).contains("Test sources: 1");
     }
 
     @Test
     void build_callsOutDddHighlightTypes() {
-        var builder = new GuardReportBuilder(graphStore, traversal, domainStore);
+        var builder = new GuardReportBuilder(graphStore, traversal);
         var report = builder.build("com.Order", 2);
         // DDD-significant types must be called out with a warning marker
         assertThat(report).contains("AGGREGATE");
@@ -109,31 +97,14 @@ class GuardReportBuilderTest {
         assertThat(report).contains("PROJECTION_HANDLER");
     }
 
-    @Test
-    void build_includesTouchedBoundedContexts() {
-        var builder = new GuardReportBuilder(graphStore, traversal, domainStore);
-        var report = builder.build("com.Order", 2);
-        assertThat(report).contains("Bounded Contexts Touched");
-        assertThat(report).contains("Order Management");
-    }
 
-    @Test
-    void build_includesMatchingDomainRules() {
-        var builder = new GuardReportBuilder(graphStore, traversal, domainStore);
-        var report = builder.build("com.Order", 2);
-        assertThat(report).contains("Matching Domain Rules");
-        assertThat(report).contains("order-minimum");
-        assertThat(report).contains("shipment-requires-payment");
-    }
 
     @Test
     void build_nonDddTierShowsBlastRadiusOnly() {
         graphStore.setConfig("tier", "GENERIC");
-        var builder = new GuardReportBuilder(graphStore, traversal, domainStore);
+        var builder = new GuardReportBuilder(graphStore, traversal);
         var report = builder.build("com.Order", 2);
-        assertThat(report).contains("Blast Radius");
-        assertThat(report).doesNotContain("Bounded Contexts Touched");
-        assertThat(report).doesNotContain("Matching Domain Rules");
+        assertThat(report).contains("Blast radius");
     }
 
     @Test
@@ -143,22 +114,18 @@ class GuardReportBuilderTest {
             "com.Leaf", "Leaf.java", 5, "class Leaf", 0));
         graphStore.setConfig("tier", "DDD");
 
-        var builder = new GuardReportBuilder(graphStore, traversal, domainStore);
+        var builder = new GuardReportBuilder(graphStore, traversal);
         var report = builder.build("com.Leaf", 2);
-        assertThat(report).contains("## Guard Report");
-        assertThat(report).contains("0 node(s) affected");
-        assertThat(report).contains("Bounded Contexts Touched");
-        assertThat(report).contains("Matching Domain Rules");
+        assertThat(report).contains("## Guard");
+        assertThat(report).contains("0 node(s)");
     }
 
     @Test
     void build_genericTierShowsOnlyBlastRadius() {
         graphStore.setConfig("tier", "GENERIC");
-        var builder = new GuardReportBuilder(graphStore, traversal, domainStore);
+        var builder = new GuardReportBuilder(graphStore, traversal);
         var report = builder.build("com.Order", 2);
-        assertThat(report).contains("Blast Radius");
-        assertThat(report).doesNotContain("Bounded Contexts Touched");
-        assertThat(report).doesNotContain("Matching Domain Rules");
+        assertThat(report).contains("Blast radius");
         assertThat(report).contains("GENERIC");
     }
 
@@ -169,17 +136,16 @@ class GuardReportBuilderTest {
         freshStore.saveNode(new Node("com.NoTierNode", NodeType.CLASS, "NoTierNode",
             "com.NoTierNode", "X.java", 1, "class X", 0));
         var freshTraversal = new GraphTraversal(freshStore);
-        var builder = new GuardReportBuilder(freshStore, freshTraversal, domainStore);
+        var builder = new GuardReportBuilder(freshStore, freshTraversal);
         var report = builder.build("com.NoTierNode", 2);
-        assertThat(report).contains("Blast Radius");
-        assertThat(report).doesNotContain("Bounded Contexts Touched");
+        assertThat(report).contains("Blast radius");
         freshStore.close();
     }
 
     @Test
     void build_depthZeroShowsNoImpact() {
-        var builder = new GuardReportBuilder(graphStore, traversal, domainStore);
+        var builder = new GuardReportBuilder(graphStore, traversal);
         var report = builder.build("com.Order", 0);
-        assertThat(report).contains("0 node(s) affected");
+        assertThat(report).contains("0 node(s)");
     }
 }

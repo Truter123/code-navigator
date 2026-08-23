@@ -49,6 +49,35 @@ class ProjectIndexerIntegrationTest {
     }
 
     @Test
+    void reindexingIsIdempotent() {
+        // Edge ids are random UUIDs and method rows autoincrement, so neither dedupes on re-insert.
+        // Before indexFull cleared them, a second init doubled every edge — on nlp, 25,823 to
+        // 52,088 — and each traversal then reported every neighbour twice.
+        indexer.indexFull(Paths.get("src/test/resources/sample-ddd"));
+        int nodesAfterFirst = store.getAllNodes().size();
+        int edgesAfterFirst = store.getAllEdges().size();
+        int methodsAfterFirst = store.findNodesByType(NodeType.METHOD).size();
+        assertThat(edgesAfterFirst).isPositive();
+
+        indexer.indexFull(Paths.get("src/test/resources/sample-ddd"));
+
+        assertThat(store.getAllEdges()).hasSize(edgesAfterFirst);
+        assertThat(store.getAllNodes()).hasSize(nodesAfterFirst);
+        assertThat(store.findNodesByType(NodeType.METHOD)).hasSize(methodsAfterFirst);
+    }
+
+    @Test
+    void indexesMethodsAsNodesWithDeclaringEdges() {
+        indexer.indexFull(Paths.get("src/test/resources/sample-ddd"));
+
+        var methods = store.findNodesByType(NodeType.METHOD);
+        assertThat(methods).isNotEmpty();
+        assertThat(methods).allMatch(m -> m.id().contains("#"));
+        assertThat(store.getAllEdges())
+            .anyMatch(e -> e.type() == com.codenavigator.graph.EdgeType.DECLARES_METHOD);
+    }
+
+    @Test
     void indexesTier3DddProject() {
         indexer.indexFull(Paths.get("src/test/resources/sample-ddd"));
         assertThat(store.findNodesByType(NodeType.AGGREGATE)).isNotEmpty();

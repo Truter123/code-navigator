@@ -1,8 +1,5 @@
 package com.codenavigator.mcp;
 
-import com.codenavigator.domain.DomainSqliteStore;
-import com.codenavigator.domain.model.BoundedContext;
-import com.codenavigator.domain.model.BusinessRule;
 import com.codenavigator.graph.*;
 
 import java.util.*;
@@ -26,12 +23,10 @@ public class GuardReportBuilder {
 
     private final GraphStore graphStore;
     private final GraphTraversal traversal;
-    private final DomainSqliteStore domainStore;
 
-    public GuardReportBuilder(GraphStore graphStore, GraphTraversal traversal, DomainSqliteStore domainStore) {
+    public GuardReportBuilder(GraphStore graphStore, GraphTraversal traversal) {
         this.graphStore = graphStore;
         this.traversal = traversal;
-        this.domainStore = domainStore;
     }
 
     /**
@@ -55,81 +50,69 @@ public class GuardReportBuilder {
         analyzed.addAll(impacted);
 
         var sb = new StringBuilder();
-        sb.append("## Guard Report: `").append(symbolName).append("`\n\n");
-
-        // (a) Blast radius
-        sb.append("### Blast Radius (depth ").append(depth).append(")\n\n");
-        sb.append(impacted.size()).append(" node(s) affected:\n\n");
-        for (Node n : impacted) {
-            String marker = DDD_HIGHLIGHT_TYPES.contains(n.type()) ? " ⚠" : "";
-            sb.append("- **").append(n.type()).append("**").append(marker)
-              .append(" `").append(n.name()).append("`")
-              .append(" (").append(n.filePath()).append(":").append(n.lineNumber()).append(")\n");
-        }
+        sb.append("## Guard: `")
+          .append(startNode.map(n -> MethodIds.shortLabel(n.id())).orElse(symbolName)).append("`\n");
+        startNode.ifPresent(n ->
+            sb.append(n.type()).append(" — ").append(n.filePath()).append(":").append(n.lineNumber()).append("\n"));
         sb.append("\n");
 
-        // Check whether this is a DDD-tier project
         String tier = graphStore.getConfig("tier");
         boolean isDdd = "DDD".equalsIgnoreCase(tier);
 
+        // Blast radius, summarised. Listing every node made this report 135 lines on a single
+        // method, most of them test cases; the DDD-significant nodes are named and the rest are
+        // counted, with cg_impact available when the full list is actually wanted.
+        sb.append("### Blast radius (depth ").append(depth).append("): ")
+          .append(impacted.size()).append(" node(s)\n");
+
+        var production = impacted.stream().filter(n -> !isTestSource(n)).toList();
+        var significant = production.stream()
+            .filter(n -> DDD_HIGHLIGHT_TYPES.contains(n.type()))
+            .toList();
+
+        if (!significant.isEmpty()) {
+            sb.append("DDD-significant (").append(significant.size()).append("):\n");
+            // Short name plus file:line, as every other tool renders a node — the path already
+            // carries the package, so repeating the fqn spends tokens on nothing.
+            significant.stream().limit(12).forEach(n ->
+                sb.append("- **").append(n.type()).append("** `").append(n.name())
+                  .append("` (").append(n.filePath()).append(":").append(n.lineNumber()).append(")\n"));
+            if (significant.size() > 12) {
+                sb.append("- … ").append(significant.size() - 12).append(" more\n");
+            }
+        }
+
+        String otherCounts = production.stream()
+            .filter(n -> !DDD_HIGHLIGHT_TYPES.contains(n.type()))
+            .collect(Collectors.groupingBy(Node::type, LinkedHashMap::new, Collectors.counting()))
+            .entrySet().stream()
+            .sorted(Map.Entry.<NodeType, Long>comparingByValue().reversed())
+            .map(e -> e.getKey() + " " + e.getValue())
+            .collect(Collectors.joining(", "));
+        if (!otherCounts.isEmpty()) sb.append("Other: ").append(otherCounts).append("\n");
+
+        long testCount = impacted.size() - production.size();
+        if (testCount > 0) {
+            sb.append("Test sources: ").append(testCount).append(" (not counted above)\n");
+        }
+        sb.append("\nFull list: cg_impact(symbol, depth ").append(depth).append(").\n");
+
         if (!isDdd) {
-            sb.append("> _Non-DDD tier (`").append(tier != null ? tier : "unknown")
+            sb.append("\n> _Non-DDD tier (`").append(tier != null ? tier : "unknown")
               .append("`) — domain context and rules sections skipped._\n");
-            return sb.toString();
         }
-
-        // (b) DDD node-type grouping (includes the start node so the edited symbol shows)
-        sb.append("### DDD Node Types Touched\n\n");
-        Map<NodeType, List<Node>> byType = analyzed.stream()
-            .collect(Collectors.groupingBy(Node::type, LinkedHashMap::new, Collectors.toList()));
-
-        // DDD highlight types first, then the rest
-        List<NodeType> orderedTypes = new ArrayList<>(byType.keySet());
-        orderedTypes.sort(Comparator.comparingInt(
-            t -> DDD_HIGHLIGHT_TYPES.contains(t) ? 0 : 1));
-
-        for (NodeType type : orderedTypes) {
-            String callout = DDD_HIGHLIGHT_TYPES.contains(type) ? " ⚠ DDD-significant" : "";
-            sb.append("#### ").append(type).append(callout).append("\n");
-            for (Node n : byType.get(type)) {
-                sb.append("- `").append(n.name()).append("` (")
-                  .append(n.filePath()).append(":").append(n.lineNumber()).append(")\n");
-            }
-        }
-        sb.append("\n");
-
-        // (c) Bounded contexts touched
-        Set<String> nodeNames = analyzed.stream().map(Node::name).collect(Collectors.toSet());
-
-        List<BoundedContext> contexts = domainStore.findContextsContaining(nodeNames);
-        sb.append("### Bounded Contexts Touched\n\n");
-        if (contexts.isEmpty()) {
-            sb.append("_No bounded context registered for these symbols._\n\n");
-        } else {
-            for (BoundedContext ctx : contexts) {
-                sb.append("- **").append(ctx.name()).append("**");
-                if (ctx.owner() != null) sb.append(" (owner: ").append(ctx.owner()).append(")");
-                sb.append("\n");
-            }
-            sb.append("\n");
-        }
-
-        // (d) Matching domain rules
-        List<BusinessRule> rules = domainStore.findRulesMentioning(nodeNames);
-        sb.append("### Matching Domain Rules\n\n");
-        if (rules.isEmpty()) {
-            sb.append("_No domain rules registered for these symbols._\n\n");
-        } else {
-            for (BusinessRule rule : rules) {
-                sb.append("- **[").append(rule.severity()).append("]** `").append(rule.name()).append("`");
-                if (rule.entity() != null) sb.append(" — entity: `").append(rule.entity()).append("`");
-                sb.append("\n");
-                sb.append("  > ").append(rule.description()).append("\n");
-                sb.append("  > Invariant: `").append(rule.invariant()).append("`\n");
-            }
-            sb.append("\n");
-        }
-
         return sb.toString();
     }
+
+    /** Source that only tests reach is rarely what a guard is warning about. */
+    private static boolean isTestSource(Node node) {
+        String path = node.filePath();
+        if (path == null) return false;
+        return path.contains("/src/test/") || path.contains("\\src\\test\\")
+            || path.endsWith("Test.java") || path.endsWith(".spec.ts") || path.contains("/e2e/");
+    }
+
+
+
+
 }

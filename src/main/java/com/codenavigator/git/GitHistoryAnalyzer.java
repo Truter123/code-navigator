@@ -54,13 +54,21 @@ public class GitHistoryAnalyzer {
         try (repository; Git git = new Git(repository)) {
             Iterable<RevCommit> commits = git.log().setMaxCount(maxCommits).call();
             try (RevWalk revWalk = new RevWalk(repository)) {
-                for (RevCommit commit : commits) {
-                    List<String> changedFiles = getChangedFiles(repository, revWalk, commit);
-                    recordPairs(changedFiles);
-                }
+                // One transaction for the whole walk. recordPairs is quadratic in a commit's file
+                // count, so a few large commits produce tens of thousands of upserts; under
+                // autocommit each one is an fsync, and this step alone outran the rest of indexing.
+                store.batch(() -> {
+                    try {
+                        for (RevCommit commit : commits) {
+                            recordPairs(getChangedFiles(repository, revWalk, commit));
+                        }
+                    } catch (IOException e) {
+                        // Best-effort: keep whatever pairs were recorded before the failure
+                    }
+                });
             }
-        } catch (GitAPIException | IOException e) {
-            // Best-effort: log nothing, caller continues normally
+        } catch (GitAPIException | RuntimeException e) {
+            // Best-effort: co-change is a ranking signal, never a reason to fail an index
         }
     }
 
@@ -105,9 +113,28 @@ public class GitHistoryAnalyzer {
         return files;
     }
 
+    /**
+     * Commits touching more files than this contribute no coupling signal.
+     *
+     * <p>Pair count is quadratic, so one 1,000-file merge writes ~500,000 rows — and those files
+     * did not "change together" in any sense a reader cares about; they were merged together. On
+     * the nlp repo the last 500 commits have a median of 3 changed files and a 90th percentile of
+     * 20, while a handful of large merges produced 1.6M of the 1.7M rows and a 964 MB database.
+     */
+    private static final int MAX_FILES_PER_COMMIT = 50;
+
+    private int skippedBulkCommits;
+
+    /** Commits ignored as bulk operations, for the caller to report. */
+    public int skippedBulkCommits() { return skippedBulkCommits; }
+
     private void recordPairs(List<String> files) {
         int n = files.size();
         if (n < 2) return;
+        if (n > MAX_FILES_PER_COMMIT) {
+            skippedBulkCommits++;
+            return;
+        }
         for (int i = 0; i < n - 1; i++) {
             for (int j = i + 1; j < n; j++) {
                 store.upsertCoChange(files.get(i), files.get(j));

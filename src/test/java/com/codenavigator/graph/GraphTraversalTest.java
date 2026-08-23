@@ -205,4 +205,71 @@ class GraphTraversalTest {
     private Set<String> nodeIds(List<Node> nodes) {
         return nodes.stream().map(Node::id).collect(Collectors.toSet());
     }
+
+    // ---- Method-level traversal ----
+
+    /**
+     * Two classes, each with one method, wired A.a() -> B.b():
+     * <pre>
+     *   A --DECLARES_METHOD--> A#a() --CALLS--> B#b() &lt;--DECLARES_METHOD-- B
+     * </pre>
+     */
+    private void buildMethodGraph() {
+        store.saveNode(new Node("A", NodeType.SERVICE, "A", "A", "A.java", 1, "", 0));
+        store.saveNode(new Node("B", NodeType.SERVICE, "B", "B", "B.java", 1, "", 0));
+        store.saveNode(new Node("A#a()", NodeType.METHOD, "a", "A#a()", "A.java", 2, "", 0));
+        store.saveNode(new Node("B#b()", NodeType.METHOD, "b", "B#b()", "B.java", 2, "", 0));
+        store.saveEdge(new Edge("d1", EdgeType.DECLARES_METHOD, "A", "A#a()"));
+        store.saveEdge(new Edge("d2", EdgeType.DECLARES_METHOD, "B", "B#b()"));
+        store.saveEdge(new Edge("c1", EdgeType.CALLS, "A#a()", "B#b()"));
+    }
+
+    @Test
+    void declaresMethodIsAFreeHopSoClassReachesClassAtDepthOne() {
+        buildMethodGraph();
+
+        // A -> A#a() -> B#b() -> B is three edges but only one call hop. If DECLARES_METHOD cost
+        // depth, class B would be unreachable at depth 1 and every class-level answer would
+        // collapse to the class's own methods.
+        assertThat(nodeIds(traversal.callees("A", 1))).contains("B");
+    }
+
+    @Test
+    void methodCallsAreFollowedInBothDirections() {
+        buildMethodGraph();
+
+        assertThat(nodeIds(traversal.callees("A#a()", 1))).contains("B#b()");
+        assertThat(nodeIds(traversal.callers("B#b()", 1))).contains("A#a()");
+    }
+
+    @Test
+    void impactFromAMethodReachesItsCaller() {
+        buildMethodGraph();
+
+        assertThat(nodeIds(traversal.impact("B#b()", 2))).contains("A#a()", "A");
+    }
+
+    @Test
+    void traversalSettlesNodesAtMinimumDepthNotFirstArrival() {
+        // C#c() is reachable two ways: one call hop via the free DECLARES_METHOD edge from C,
+        // and two call hops through the chain. A plain FIFO queue can settle it at the longer
+        // depth depending on edge insertion order; 0-1 BFS must always settle it at the shorter.
+        buildMethodGraph();
+        store.saveNode(new Node("C", NodeType.SERVICE, "C", "C", "C.java", 1, "", 0));
+        store.saveNode(new Node("C#c()", NodeType.METHOD, "c", "C#c()", "C.java", 2, "", 0));
+        store.saveEdge(new Edge("c2", EdgeType.CALLS, "B#b()", "C#c()"));
+        store.saveEdge(new Edge("d3", EdgeType.DECLARES_METHOD, "C", "C#c()"));
+
+        // A#a() -> B#b() -> C#c() is two call hops.
+        assertThat(nodeIds(traversal.callees("A#a()", 2))).contains("C#c()");
+        assertThat(nodeIds(traversal.callees("A#a()", 1))).doesNotContain("C#c()");
+    }
+
+    @Test
+    void startNodeIsNeverEmittedAsItsOwnResult() {
+        buildMethodGraph();
+
+        assertThat(nodeIds(traversal.callees("A", 3))).doesNotContain("A");
+        assertThat(nodeIds(traversal.impact("A", 3))).doesNotContain("A");
+    }
 }

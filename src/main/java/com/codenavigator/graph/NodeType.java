@@ -11,6 +11,8 @@ public enum NodeType {
     COMMAND, COMMAND_HANDLER, QUERY, QUERY_HANDLER,
     AGGREGATE, DOMAIN_EVENT, EVENT_APPLIER,
     PROJECTION_HANDLER, EVENT_LISTENER,
+    // Member-level
+    METHOD,
     // Frontend
     FE_SERVICE, FE_COMPONENT, FE_MODEL,
     // Frontend (extended) + scripts

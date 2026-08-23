@@ -3,6 +3,8 @@ package com.codenavigator.graph;
 public enum EdgeType {
     // Tier 1: Generic
     INJECTS, CALLS_METHOD, IMPLEMENTS, EXTENDS, RETURNS_TYPE,
+    // Member-level: class->method (structural), method->method (call), method->method (override)
+    DECLARES_METHOD, CALLS, OVERRIDES,
     // Tier 2: Spring
     READS_VIEW, UPDATES_VIEW, PUBLISHES_EVENT,
     // Tier 3: DDD

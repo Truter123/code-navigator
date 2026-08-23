@@ -23,6 +23,7 @@ public class ProjectIndexer {
     private final TypeScriptIndexer tsIndexer;
     private final GroovyIndexer groovyIndexer;
     private final MethodExtractor methodExtractor;
+    private final TypeScriptMethodExtractor tsMethodExtractor;
     private final DependencyParser dependencyParser;
     private final com.codenavigator.embedding.EmbeddingProvider embeddingProvider;
 
@@ -37,11 +38,20 @@ public class ProjectIndexer {
         this.tsIndexer = new TypeScriptIndexer();
         this.groovyIndexer = new GroovyIndexer();
         this.methodExtractor = new MethodExtractor();
+        this.tsMethodExtractor = new TypeScriptMethodExtractor();
         this.dependencyParser = new DependencyParser();
     }
 
     public void indexFull(Path projectPath) {
         configureParser();
+
+        // 0. Start from empty. Edge ids are random UUIDs and method rows are autoincrement, so
+        // INSERT OR REPLACE cannot dedupe either: without this, a second `init` over an existing
+        // database doubles every edge (25,823 -> 52,088 on nlp) and every traversal silently
+        // reports each neighbour twice. Nodes are keyed by id and so replace cleanly, though a
+        // node whose file has since been deleted survives until indexIncremental prunes it.
+        store.deleteAllEdges();
+        store.deleteAllMethods();
 
         // 1. Detect project type
         Project project = projectDetector.detect(projectPath);
@@ -65,6 +75,7 @@ public class ProjectIndexer {
         List<Path> groovyFiles = findGroovyFiles(projectPath);
 
         // 3. Phase 1: Extract nodes from Java files
+        store.batch(() -> {
         for (Path file : javaFiles) {
             try {
                 var cu = StaticJavaParser.parse(file);
@@ -82,30 +93,35 @@ public class ProjectIndexer {
                 // Skip unparseable files
             }
         }
+        });
 
-        // Phase 1c: Extract methods from Java files
+        // Phase 1c: Extract methods from Java files (signature rows + METHOD nodes)
+        store.batch(() -> {
         for (Path file : javaFiles) {
             try {
                 var cu = StaticJavaParser.parse(file);
                 var filePath = projectPath.relativize(file).toString();
+                long lastModified = Files.getLastModifiedTime(file).toMillis();
                 var fileNodes = store.findNodesByFilePath(filePath);
-                var methods = methodExtractor.extract(cu, fileNodes);
-                for (var method : methods) {
-                    store.saveMethod(method);
-                }
+                saveMethods(methodExtractor.extract(cu, fileNodes, filePath, lastModified));
             } catch (Exception e) {
                 // Skip unparseable files
             }
         }
+        });
 
-        // 4. Phase 1b: Extract nodes from TS files
-        for (Path file : tsFiles) {
-            var nodes = tsIndexer.indexFile(file);
-            for (Node node : nodes) {
-                store.saveNode(node);
-                embedNode(node);
+        // 4. Phase 1b: Extract nodes from TS files, then their methods
+        var tsMethods = new ArrayList<TypeScriptMethodExtractor.TsMethod>();
+        store.batch(() -> {
+            for (Path file : tsFiles) {
+                var nodes = tsIndexer.indexFile(file);
+                for (Node node : nodes) {
+                    store.saveNode(node);
+                    embedNode(node);
+                }
+                tsMethods.addAll(saveTsMethods(file, nodes));
             }
-        }
+        });
 
         // 4b. Phase 1d: Extract nodes from Groovy files (CI/CD scripts; no edges)
         for (Path file : groovyFiles) {
@@ -119,12 +135,18 @@ public class ProjectIndexer {
         // 5. Phase 2: Extract edges
         extractAndSaveEdges(javaFiles, projectPath, edgeExtractor);
         extractFeEdges();
+        extractTsCallEdges(tsMethods);
 
         // 6. Track indexed files
         trackFiles(projectPath, javaFiles, tsFiles, groovyFiles);
 
         // 7. Mine git co-change coupling (silently skipped if not a git repo)
-        new GitHistoryAnalyzer(store).analyze(projectPath, 500);
+        var gitAnalyzer = new GitHistoryAnalyzer(store);
+        gitAnalyzer.analyze(projectPath, 500);
+        if (gitAnalyzer.skippedBulkCommits() > 0) {
+            System.err.printf("Co-change: skipped %d bulk commit(s) touching more than 50 files.%n",
+                gitAnalyzer.skippedBulkCommits());
+        }
     }
 
     public void indexIncremental(Path projectPath) {
@@ -163,20 +185,126 @@ public class ProjectIndexer {
 
     // ---- Shared extraction helpers ----
 
+    /**
+     * Persist a file's extracted methods: the signature row always, and for real methods (not
+     * record components) the METHOD node plus the DECLARES_METHOD edge that binds it to its class.
+     */
+    private void saveMethods(List<MethodExtractor.ExtractedMethod> methods) {
+        for (var method : methods) {
+            store.saveMethod(method.record());
+            if (method.node() == null) continue;       // record component: data, not behaviour
+            store.saveNode(method.node());
+            store.saveEdge(new Edge(UUID.randomUUID().toString(), EdgeType.DECLARES_METHOD,
+                method.declaringClassId(), method.node().id()));
+        }
+    }
+
+    /**
+     * Persist METHOD nodes and DECLARES_METHOD edges for one TypeScript file, returning what was
+     * found so the call pass can resolve against it once every class is in the graph.
+     */
+    private List<TypeScriptMethodExtractor.TsMethod> saveTsMethods(Path file, List<Node> classNodes) {
+        String content;
+        long lastModified;
+        try {
+            content = Files.readString(file);
+            lastModified = Files.getLastModifiedTime(file).toMillis();
+        } catch (IOException e) {
+            return List.of();
+        }
+
+        var found = tsMethodExtractor.extract(content, classNodes, file.toString(), lastModified);
+        for (var method : found) {
+            store.saveNode(method.node());
+            store.saveEdge(new Edge(UUID.randomUUID().toString(), EdgeType.DECLARES_METHOD,
+                method.ownerName(), method.node().id()));
+        }
+        return found;
+    }
+
+    /** Resolve TypeScript method -> method calls, after every TS class and method node exists. */
+    private void extractTsCallEdges(List<TypeScriptMethodExtractor.TsMethod> tsMethods) {
+        if (tsMethods.isEmpty()) return;
+
+        var knownTypes = new java.util.HashSet<String>();
+        for (Node n : store.getAllNodes()) {
+            if (n.type() != NodeType.METHOD) knownTypes.add(n.name());
+        }
+
+        var edges = tsMethodExtractor.resolveCalls(tsMethods, knownTypes);
+        store.batch(() -> {
+            for (Edge edge : edges) store.saveEdge(edge);
+        });
+
+        int seen = tsMethodExtractor.callSitesSeen();
+        int resolved = tsMethodExtractor.callSitesResolved();
+        int external = tsMethodExtractor.receiverExternal();
+        int judged = seen - external;
+        System.err.printf("TypeScript call graph: %d method(s); %d/%d calls into project types "
+                + "bound (%.0f%%), %d into framework types.%n",
+            tsMethods.size(), resolved, judged,
+            judged <= 0 ? 100.0 : (100.0 * resolved / judged), external);
+    }
+
+    /**
+     * Edge pass: class-level edges and method -> method CALLS from the same parse of each file,
+     * then OVERRIDES derived once the supertype edges exist.
+     */
     private void extractAndSaveEdges(List<Path> javaFiles, Path projectPath, EdgeExtractor edgeExtractor) {
-        for (Path file : javaFiles) {
-            try {
-                var cu = StaticJavaParser.parse(file);
-                var filePath = projectPath.relativize(file).toString();
-                var fileNodes = store.findNodesByFilePath(filePath);
-                for (Node sourceNode : fileNodes) {
-                    var edges = edgeExtractor.extract(cu, sourceNode);
-                    for (Edge edge : edges) {
-                        store.saveEdge(edge);
+        // Built here, after phase 1c, so every class and method node is already in the graph —
+        // resolving a call means looking the receiver's methods up.
+        var callExtractor = new MethodCallExtractor(store);
+
+        store.batch(() -> {
+            for (Path file : javaFiles) {
+                try {
+                    var cu = StaticJavaParser.parse(file);
+                    var filePath = projectPath.relativize(file).toString();
+                    var fileNodes = store.findNodesByFilePath(filePath);
+                    for (Node sourceNode : fileNodes) {
+                        for (Edge edge : edgeExtractor.extract(cu, sourceNode)) {
+                            store.saveEdge(edge);
+                        }
                     }
+                    if (callExtractor.hasMethods()) {
+                        for (Edge edge : callExtractor.extract(cu)) {
+                            store.saveEdge(edge);
+                        }
+                    }
+                } catch (Exception e) {
+                    // Skip unparseable files
                 }
-            } catch (Exception e) {
-                // Skip unparseable files
+            }
+        });
+
+        if (!callExtractor.hasMethods()) return;
+
+        store.batch(() -> {
+            // Supertype edges are complete now, so parked calls through an interface can bind.
+            for (Edge edge : callExtractor.resolvePending()) {
+                store.saveEdge(edge);
+            }
+            for (Edge edge : callExtractor.deriveOverrides()) {
+                store.saveEdge(edge);
+            }
+        });
+
+        int seen = callExtractor.callSitesSeen();
+        int resolved = callExtractor.callSitesResolved();
+        int accessors = callExtractor.accessorMiss();
+        // Judged only on calls that could name a method: generated accessors and data-type reads
+        // are field access, and external receivers are out of scope. An unresolved call that is
+        // none of those is a real hole in the call graph, so it stays visible.
+        int judged = callExtractor.receiverBehavioural() - accessors;
+        System.err.printf("Method call graph: %d/%d calls bound (%.0f%%).%n"
+                + "  %d call sites total: %d external, %d data-type reads, %d generated accessors.%n",
+            resolved, judged, judged <= 0 ? 100.0 : (100.0 * resolved / judged),
+            seen, callExtractor.receiverExternal(), callExtractor.receiverDataType(), accessors);
+
+        if (System.getenv("CODE_NAVIGATOR_DEBUG_CALLS") != null) {
+            System.err.println("  Top unresolved call shapes:");
+            for (var entry : callExtractor.topUnresolved(25)) {
+                System.err.printf("    %6d  %s%n", entry.getValue(), entry.getKey());
             }
         }
     }
@@ -202,10 +330,7 @@ public class ProjectIndexer {
 
                 // Re-extract methods for this file's nodes
                 var updatedNodes = store.findNodesByFilePath(filePath);
-                var methods = methodExtractor.extract(cu, updatedNodes);
-                for (var method : methods) {
-                    store.saveMethod(method);
-                }
+                saveMethods(methodExtractor.extract(cu, updatedNodes, filePath, currentModified));
             } catch (Exception e) {
                 // Skip
             }
@@ -226,6 +351,7 @@ public class ProjectIndexer {
                     store.saveNode(node);
                     embedNode(node);
                 }
+                saveTsMethods(file, nodes);
             } catch (Exception e) {
                 // Skip
             }

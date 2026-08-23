@@ -33,11 +33,11 @@ class BenchmarkRunnerTest {
     }
 
     @Test
-    void runnerProducesThreeRows() {
+    void runnerProducesARowPerScenario() {
         var runner = new BenchmarkRunner(store, new GraphTraversal(store), tempDir, new TokenEstimator(),
             Paths.get("src/test/resources/sample-ddd"));
         List<BenchmarkRow> rows = runner.run();
-        assertThat(rows).hasSize(3);
+        assertThat(rows).hasSize(2);
     }
 
     @Test
@@ -46,21 +46,21 @@ class BenchmarkRunnerTest {
             Paths.get("src/test/resources/sample-ddd"));
         List<BenchmarkRow> rows = runner.run();
         assertThat(rows).extracting(BenchmarkRow::scenario)
-            .containsExactly("whole-project", "symbol-impact", "compact-export");
+            .containsExactly("symbol-impact", "compact-export");
     }
 
     @Test
-    void briefingAndImpactSmallerThanBaseline() {
-        // The briefing (whole-project) and the cg_impact report (symbol-impact) are
-        // always more compact than reading the raw files they summarize. The full-graph
-        // JSON export (compact-export) only wins on large codebases — on a tiny fixture
-        // its structural overhead can exceed the terse source, so it is checked separately.
+    void impactSmallerThanBaseline() {
+        // The cg_related report (symbol-impact) is always more compact than reading the raw files
+        // it summarises. The full-graph JSON export (compact-export) only wins on large codebases —
+        // on a tiny fixture its structural overhead can exceed the terse source, so it is checked
+        // separately.
         var runner = new BenchmarkRunner(store, new GraphTraversal(store), tempDir, new TokenEstimator(),
             Paths.get("src/test/resources/sample-ddd"));
         var winning = runner.run().stream()
-            .filter(r -> r.scenario().equals("whole-project") || r.scenario().equals("symbol-impact"))
+            .filter(r -> r.scenario().equals("symbol-impact"))
             .toList();
-        assertThat(winning).hasSize(2);
+        assertThat(winning).hasSize(1);
         for (var row : winning) {
             assertThat(row.navigatorTokens())
                 .as("navigator should be smaller than baseline for scenario '%s'", row.scenario())

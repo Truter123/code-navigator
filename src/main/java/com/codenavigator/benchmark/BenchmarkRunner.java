@@ -1,6 +1,5 @@
 package com.codenavigator.benchmark;
 
-import com.codenavigator.briefing.BriefingGenerator;
 import com.codenavigator.export.ExportService;
 import com.codenavigator.graph.GraphStore;
 import com.codenavigator.graph.GraphTraversal;
@@ -14,11 +13,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Runs the three fixed benchmark scenarios and returns one {@link BenchmarkRow} per scenario.
+ * Runs the fixed benchmark scenarios and returns one {@link BenchmarkRow} per scenario.
  *
  * <p>Scenarios:
  * <ol>
- *   <li><b>whole-project</b> — all raw source files vs full briefing (.ai-briefing/ dir)</li>
  *   <li><b>symbol-impact</b> — raw files in blast radius vs cg_impact formatted output</li>
  *   <li><b>compact-export</b> — all raw source files vs compact JSON export</li>
  * </ol>
@@ -54,7 +52,6 @@ public class BenchmarkRunner {
      */
     public List<BenchmarkRow> run() {
         List<BenchmarkRow> rows = new ArrayList<>();
-        rows.add(runWholeProject());
         rows.add(runSymbolImpact());
         rows.add(runCompactExport());
         return rows;
@@ -91,24 +88,6 @@ public class BenchmarkRunner {
 
     // ---- Scenario 1: whole-project ----
 
-    private BenchmarkRow runWholeProject() {
-        // Baseline: concatenate all raw source files
-        int baselineTokens = estimator.estimate(readAllSourceFiles());
-
-        // Navigator: full briefing written to tempDir, then read back
-        int navigatorTokens;
-        try {
-            Path briefingDir = tempDir.resolve("briefing-whole");
-            Files.createDirectories(briefingDir);
-            new BriefingGenerator(store, null).generate(briefingDir);
-            String briefingContent = readDirectoryContents(briefingDir);
-            navigatorTokens = estimator.estimate(briefingContent);
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to generate briefing for whole-project scenario", e);
-        }
-
-        return makeRow("whole-project", baselineTokens, navigatorTokens);
-    }
 
     // ---- Scenario 2: symbol-impact ----
 

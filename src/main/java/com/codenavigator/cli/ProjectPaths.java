@@ -30,16 +30,6 @@ public final class ProjectPaths {
         return Files.exists(graphDb(projectRoot));
     }
 
-    private static final String DOMAIN_GRAPH_DIR = "navigators/domain";
-    private static final String DOMAIN_DB_FILE = "domain-navigator.db";
-
-    public static Path domainDb(Path projectRoot) {
-        return projectRoot.resolve(DOMAIN_GRAPH_DIR).resolve(DOMAIN_DB_FILE);
-    }
-
-    public static boolean hasDomainIndex(Path projectRoot) {
-        return Files.exists(domainDb(projectRoot));
-    }
 
     /**
      * Resolve project path from: (1) explicit path, (2) CLI argument, (3) env var, (4) cwd.

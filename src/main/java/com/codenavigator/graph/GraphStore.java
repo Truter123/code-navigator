@@ -3,8 +3,10 @@ package com.codenavigator.graph;
 import java.nio.file.Path;
 import java.sql.*;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 public class GraphStore implements AutoCloseable {
 
@@ -105,6 +107,36 @@ public class GraphStore implements AutoCloseable {
     }
 
     // ---- Node operations ----
+
+    private int batchDepth;
+
+    /**
+     * Run {@code work} as a single transaction.
+     *
+     * <p>Saves otherwise autocommit, which under WAL means an fsync per row — the dominant cost
+     * when an index writes tens of thousands of nodes and edges. Nesting is safe: only the
+     * outermost call commits.
+     */
+    public void batch(Runnable work) {
+        if (batchDepth > 0) {          // already inside a transaction
+            work.run();
+            return;
+        }
+        try {
+            connection.setAutoCommit(false);
+            batchDepth++;
+            work.run();
+            connection.commit();
+        } catch (SQLException e) {
+            throw new RuntimeException("Batch failed", e);
+        } catch (RuntimeException e) {
+            try { connection.rollback(); } catch (SQLException ignored) { }
+            throw e;
+        } finally {
+            batchDepth--;
+            try { connection.setAutoCommit(true); } catch (SQLException ignored) { }
+        }
+    }
 
     public void saveNode(Node node) {
         try {
@@ -315,6 +347,182 @@ public class GraphStore implements AutoCloseable {
         }
     }
 
+    // ---- Dead-code candidates (tiered, supertype/entry-point/test aware) ----
+
+    /**
+     * Node types a framework invokes reflectively or by auto-registration: HTTP dispatch, an
+     * event/command/query bus, DI container wiring. Nothing in the graph will ever reference
+     * these directly even when they're fully live, so a bare "no incoming edges" reading is
+     * expected, not a dead-code signal.
+     */
+    private static final Set<NodeType> FRAMEWORK_ENTRY_POINT_TYPES = Set.of(
+        NodeType.CONTROLLER, NodeType.EVENT_LISTENER, NodeType.PROJECTION_HANDLER,
+        NodeType.EVENT_APPLIER, NodeType.COMMAND_HANDLER, NodeType.QUERY_HANDLER,
+        NodeType.CONFIGURATION
+    );
+
+    /**
+     * Node types whose references the indexer reliably captures as graph edges (DI injection,
+     * direct method calls) — a miss here is a stronger dead-code signal. Everything else (DTOs,
+     * interfaces, enums, records, events, commands/queries, template/route-driven frontend
+     * artifacts, ...) can plausibly be reached through JSON/JPA (de)serialization, generic
+     * lookups, or template/selector wiring the indexer doesn't model as an edge, so it lands in
+     * {@link DeadCodeConfidence#MEDIUM} instead.
+     */
+    private static final Set<NodeType> HIGH_CONFIDENCE_TYPES = Set.of(
+        NodeType.CLASS, NodeType.SERVICE, NodeType.REPOSITORY, NodeType.MAPPER,
+        NodeType.VIEW, NodeType.EVENT_PUBLISHER, NodeType.AGGREGATE,
+        NodeType.FE_SERVICE, NodeType.FE_CLASS, NodeType.FE_CONSTANT
+    );
+
+    public record DeadCodeCandidate(Node node, DeadCodeConfidence confidence, String reason) {}
+
+    /**
+     * Like {@link #findDeadNodes(NodeType)}, but supertype-aware, entry-point-aware and
+     * test-aware, with each result tiered by how confident the signal actually is. A node is
+     * dropped entirely (not "dead" at all) when something it {@code IMPLEMENTS}/{@code EXTENDS}
+     * is itself referenced — the classic "callers inject the interface, so the impl class shows
+     * zero incoming edges" false positive.
+     */
+    public List<DeadCodeCandidate> findDeadNodeCandidates(NodeType typeFilter) {
+        List<DeadCodeCandidate> result = new ArrayList<>();
+
+        for (Node node : findNoIncomingEdgeNodes(typeFilter)) {
+            if (isTestSource(node.filePath())) {
+                result.add(new DeadCodeCandidate(node, DeadCodeConfidence.TEST_SOURCE,
+                    "Test source — JUnit/Vitest invoke it reflectively, so it has no incoming " +
+                    "graph edges by construction. Not dead code."));
+                continue;
+            }
+            if (hasLiveSupertype(node.id(), new HashSet<>())) {
+                // Referenced only through an IMPLEMENTS/EXTENDS supertype (e.g. callers inject
+                // the interface). Genuinely live — not a dead-code candidate at all.
+                continue;
+            }
+            if (FRAMEWORK_ENTRY_POINT_TYPES.contains(node.type())) {
+                result.add(new DeadCodeCandidate(node, DeadCodeConfidence.LOW,
+                    "Framework entry point (" + node.type() + ") — dispatched by reflection or " +
+                    "auto-registration, so it will never show incoming graph edges even when live."));
+                continue;
+            }
+            DeadCodeConfidence confidence = HIGH_CONFIDENCE_TYPES.contains(node.type())
+                ? DeadCodeConfidence.HIGH : DeadCodeConfidence.MEDIUM;
+            String reason = confidence == DeadCodeConfidence.HIGH
+                ? "No incoming edges, no live supertype, not a framework entry point — " +
+                  "this node type's references are reliably captured as edges, so this is a " +
+                  "strong candidate. Still verify before deleting."
+                : "No incoming edges, no live supertype, not a framework entry point — but this " +
+                  "node type is commonly reached via reflection/serialization/generic lookup " +
+                  "that the indexer may not capture as an edge. Verify manually.";
+            result.add(new DeadCodeCandidate(node, confidence, reason));
+        }
+
+        for (Node node : findUsedOnlyByTestsNodes(typeFilter)) {
+            result.add(new DeadCodeCandidate(node, DeadCodeConfidence.USED_ONLY_BY_TESTS,
+                "Has incoming edges, but every one of them originates in test code — unused by " +
+                "production code as far as the graph shows. May be intentional test scaffolding, " +
+                "or the last caller keeping otherwise-dead code reachable."));
+        }
+
+        return result;
+    }
+
+    /** Same "no incoming edges" query as {@link #findDeadNodes}, but without the hardcoded
+     *  type exclusion — every type is eligible, and confidence tiering does the ranking instead. */
+    private List<Node> findNoIncomingEdgeNodes(NodeType typeFilter) {
+        String sql = typeFilter != null
+            ? """
+                SELECT n.* FROM nodes n
+                LEFT JOIN edges e ON e.target_id = n.id
+                WHERE e.id IS NULL AND n.type = ?
+                ORDER BY n.type, n.name"""
+            : """
+                SELECT n.* FROM nodes n
+                LEFT JOIN edges e ON e.target_id = n.id
+                WHERE e.id IS NULL
+                ORDER BY n.type, n.name""";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            if (typeFilter != null) {
+                ps.setString(1, typeFilter.name());
+            }
+            return mapNodes(ps.executeQuery());
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to find nodes with no incoming edges", e);
+        }
+    }
+
+    /** Template for {@link #findUsedOnlyByTestsNodes}: %1$s is the (optional) "n.type = ?  AND"
+     *  clause, %2$s is the not-test-source predicate applied to the candidate node itself, %3$s
+     *  the same predicate applied to each incoming edge's source node. */
+    private static final String USED_ONLY_BY_TESTS_SQL = """
+        SELECT n.* FROM nodes n
+        WHERE %1$s %2$s
+        AND EXISTS (SELECT 1 FROM edges e WHERE e.target_id = n.id)
+        AND NOT EXISTS (
+            SELECT 1 FROM edges e2
+            JOIN nodes src ON src.id = e2.source_id
+            WHERE e2.target_id = n.id AND %3$s
+        )
+        ORDER BY n.type, n.name""";
+
+    /** Main-source nodes that have incoming edges, but only from test-source callers. */
+    private List<Node> findUsedOnlyByTestsNodes(NodeType typeFilter) {
+        String typeClause = typeFilter != null ? "n.type = ? AND" : "";
+        String sql = USED_ONLY_BY_TESTS_SQL.formatted(
+            typeClause, NOT_TEST_SOURCE_SQL.formatted("n"), NOT_TEST_SOURCE_SQL.formatted("src"));
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            if (typeFilter != null) {
+                ps.setString(1, typeFilter.name());
+            }
+            return mapNodes(ps.executeQuery());
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to find used-only-by-tests nodes", e);
+        }
+    }
+
+    /** SQL predicate fragment: "<alias> is NOT a test-source node". Must stay in sync with
+     *  {@link #isTestSource(String)} — same rule, one in SQL for set queries, one in Java for
+     *  per-node checks. %1$s is the table alias to apply it to. */
+    private static final String NOT_TEST_SOURCE_SQL = """
+        (%1$s.file_path NOT LIKE '%%src/test/%%'
+         AND %1$s.file_path NOT LIKE '%%Test.java'
+         AND %1$s.file_path NOT LIKE '%%Tests.java'
+         AND %1$s.file_path NOT LIKE '%%.spec.ts')""";
+
+    /** src/test/, *Test.java, *Tests.java, *.spec.ts — JUnit/Vitest invoke these reflectively,
+     *  so an empty incoming-edge set is expected and carries no dead-code signal. */
+    private static boolean isTestSource(String filePath) {
+        if (filePath == null) return false;
+        String p = filePath.replace('\\', '/');
+        return p.contains("src/test/") || p.endsWith("Test.java")
+            || p.endsWith("Tests.java") || p.endsWith(".spec.ts");
+    }
+
+    /** Walks IMPLEMENTS/EXTENDS edges transitively from {@code nodeId}; true if any reachable
+     *  supertype is itself referenced by something other than an IMPLEMENTS/EXTENDS edge
+     *  (typically callers that inject/depend on the interface rather than the implementation).
+     *  Cycle-safe via visited; depth-capped as a cheap safety net against pathological graphs. */
+    private boolean hasLiveSupertype(String nodeId, Set<String> visited) {
+        if (!visited.add(nodeId) || visited.size() > 50) return false;
+        List<Edge> superEdges = new ArrayList<>(findEdgesFromByType(nodeId, EdgeType.IMPLEMENTS));
+        superEdges.addAll(findEdgesFromByType(nodeId, EdgeType.EXTENDS));
+        for (Edge edge : superEdges) {
+            if (hasNonInheritanceIncomingEdge(edge.targetId())) return true;
+            if (hasLiveSupertype(edge.targetId(), visited)) return true;
+        }
+        return false;
+    }
+
+    /** True if {@code nodeId} has an incoming edge that isn't just IMPLEMENTS/EXTENDS. Excluding
+     *  those is what makes {@link #hasLiveSupertype} meaningful: an interface with a single
+     *  implementor always has an incoming IMPLEMENTS edge from that implementor alone, which
+     *  would otherwise make every interface look "live" regardless of whether anything actually
+     *  depends on it. */
+    private boolean hasNonInheritanceIncomingEdge(String nodeId) {
+        return findEdgesTo(nodeId).stream()
+            .anyMatch(e -> e.type() != EdgeType.IMPLEMENTS && e.type() != EdgeType.EXTENDS);
+    }
+
     public void deleteAllEdges() {
         try (Statement stmt = connection.createStatement()) {
             stmt.execute("DELETE FROM edges");
@@ -338,6 +546,18 @@ public class GraphStore implements AutoCloseable {
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("Failed to save method: " + method.name(), e);
+        }
+    }
+
+    /**
+     * Clear the method signature side-table. Rows carry an autoincrement id rather than a natural
+     * key, so re-indexing appends duplicates unless they are removed first.
+     */
+    public void deleteAllMethods() {
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("DELETE FROM methods");
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to delete methods", e);
         }
     }
 

@@ -110,4 +110,26 @@ class GitHistoryAnalyzerTest {
         var analyzer = new GitHistoryAnalyzer(store);
         assertThatNoException().isThrownBy(() -> analyzer.analyze(nonGitDir, 500));
     }
+
+    @Test
+    void skipsBulkCommitsSoOneMergeCannotFloodTheTable() throws Exception {
+        // A commit touching more files than the cap contributes n(n-1)/2 pairs of pure noise:
+        // those files were merged together, not changed together. On the nlp repo 18 such commits
+        // produced 1.6M of 1.7M rows and a 964 MB database.
+        var many = new String[60];
+        for (int i = 0; i < many.length; i++) many[i] = "bulk/F" + i + ".java";
+        writeAndCommit("bulk merge", many);
+
+        // A normal-sized commit alongside it must still be recorded.
+        writeAndCommit("real change", "src/A.java", "src/B.java");
+
+        var analyzer = new GitHistoryAnalyzer(store);
+        analyzer.analyze(repoDir, 100);
+
+        assertThat(analyzer.skippedBulkCommits()).isEqualTo(1);
+        assertThat(store.topCoupled("src/A.java", 10))
+            .extracting(GraphStore.CoChangePair::otherFile)
+            .containsExactly("src/B.java");
+        assertThat(store.topCoupled("bulk/F0.java", 10)).isEmpty();
+    }
 }

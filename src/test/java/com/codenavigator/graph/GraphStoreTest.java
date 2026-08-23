@@ -346,6 +346,105 @@ class GraphStoreTest {
         assertThat(dead).extracting(Node::name).doesNotContain("Ctrl");
     }
 
+    // ---- findDeadNodeCandidates: supertype-aware, entry-point-aware, test-aware, tiered ----
+
+    @Test
+    void findDeadNodeCandidates_excludesImplWhoseInterfaceIsInjected() {
+        // The exact shape of the verified false positive: AndonReadsImpl implements AndonReads;
+        // callers inject the interface, so the impl itself has zero incoming edges.
+        store.saveNode(new Node("impl", NodeType.SERVICE, "AndonReadsImpl", "com.AndonReadsImpl", "f1", 1, "", 0));
+        store.saveNode(new Node("iface", NodeType.INTERFACE, "AndonReads", "com.AndonReads", "f2", 1, "", 0));
+        store.saveNode(new Node("caller", NodeType.CONTROLLER, "AndonController", "com.AndonController", "f3", 1, "", 0));
+        store.saveEdge(new Edge("e1", EdgeType.IMPLEMENTS, "impl", "iface"));
+        store.saveEdge(new Edge("e2", EdgeType.INJECTS, "caller", "iface"));
+
+        var candidates = store.findDeadNodeCandidates(NodeType.SERVICE);
+        assertThat(candidates).extracting(c -> c.node().name()).doesNotContain("AndonReadsImpl");
+    }
+
+    @Test
+    void findDeadNodeCandidates_transitiveSupertypeIndirection() {
+        // A extends B extends C; only C is actually referenced. A and B must both be excluded.
+        store.saveNode(new Node("a", NodeType.CLASS, "A", "com.A", "f1", 1, "", 0));
+        store.saveNode(new Node("b", NodeType.CLASS, "B", "com.B", "f2", 1, "", 0));
+        store.saveNode(new Node("c", NodeType.CLASS, "C", "com.C", "f3", 1, "", 0));
+        store.saveNode(new Node("caller", NodeType.SERVICE, "Caller", "com.Caller", "f4", 1, "", 0));
+        store.saveEdge(new Edge("e1", EdgeType.EXTENDS, "a", "b"));
+        store.saveEdge(new Edge("e2", EdgeType.EXTENDS, "b", "c"));
+        store.saveEdge(new Edge("e3", EdgeType.CALLS_METHOD, "caller", "c"));
+
+        var candidates = store.findDeadNodeCandidates(null);
+        assertThat(candidates).extracting(c -> c.node().name()).doesNotContain("A", "B");
+    }
+
+    @Test
+    void findDeadNodeCandidates_interfaceWithSoleImplementorIsStillDead() {
+        // Regression guard: an interface's incoming IMPLEMENTS edge from its own (otherwise
+        // unreferenced) implementor must NOT count as "the interface is live" — otherwise every
+        // class that implements anything would be excluded regardless of real usage.
+        store.saveNode(new Node("impl", NodeType.SERVICE, "OnlyImpl", "com.OnlyImpl", "f1", 1, "", 0));
+        store.saveNode(new Node("iface", NodeType.INTERFACE, "OnlyIface", "com.OnlyIface", "f2", 1, "", 0));
+        store.saveEdge(new Edge("e1", EdgeType.IMPLEMENTS, "impl", "iface"));
+
+        var candidates = store.findDeadNodeCandidates(NodeType.SERVICE);
+        assertThat(candidates).extracting(c -> c.node().name()).contains("OnlyImpl");
+        assertThat(candidates.stream().filter(c -> c.node().name().equals("OnlyImpl")).findFirst().get().confidence())
+            .isEqualTo(DeadCodeConfidence.HIGH);
+    }
+
+    @Test
+    void findDeadNodeCandidates_demotesFrameworkEntryPoints() {
+        store.saveNode(new Node("n1", NodeType.CONTROLLER, "OrphanController", "com.OrphanController", "f1", 1, "", 0));
+
+        var candidates = store.findDeadNodeCandidates(NodeType.CONTROLLER);
+        assertThat(candidates).hasSize(1);
+        assertThat(candidates.get(0).confidence()).isEqualTo(DeadCodeConfidence.LOW);
+    }
+
+    @Test
+    void findDeadNodeCandidates_testSourceIsNeverDead() {
+        store.saveNode(new Node("n1", NodeType.SERVICE, "FooTest", "com.FooTest", "src/test/java/com/FooTest.java", 1, "", 0));
+        store.saveNode(new Node("n2", NodeType.FE_COMPONENT, "BarSpec", "com.BarSpec", "src/app/bar.spec.ts", 1, "", 0));
+
+        var candidates = store.findDeadNodeCandidates(null);
+        var testCandidates = candidates.stream()
+            .filter(c -> c.node().name().equals("FooTest") || c.node().name().equals("BarSpec")).toList();
+        assertThat(testCandidates).hasSize(2);
+        assertThat(testCandidates).allMatch(c -> c.confidence() == DeadCodeConfidence.TEST_SOURCE);
+    }
+
+    @Test
+    void findDeadNodeCandidates_flagsUsedOnlyByTests() {
+        store.saveNode(new Node("prod", NodeType.SERVICE, "HelperUtil", "com.HelperUtil", "src/main/java/com/HelperUtil.java", 1, "", 0));
+        store.saveNode(new Node("test", NodeType.SERVICE, "HelperUtilTest", "com.HelperUtilTest", "src/test/java/com/HelperUtilTest.java", 1, "", 0));
+        store.saveEdge(new Edge("e1", EdgeType.CALLS_METHOD, "test", "prod"));
+
+        var candidates = store.findDeadNodeCandidates(null);
+        var found = candidates.stream().filter(c -> c.node().name().equals("HelperUtil")).findFirst();
+        assertThat(found).isPresent();
+        assertThat(found.get().confidence()).isEqualTo(DeadCodeConfidence.USED_ONLY_BY_TESTS);
+    }
+
+    @Test
+    void findDeadNodeCandidates_ranksHighVsMedium() {
+        store.saveNode(new Node("n1", NodeType.SERVICE, "OrphanService", "com.OrphanService", "f1", 1, "", 0));
+        store.saveNode(new Node("n2", NodeType.ENTITY, "OrphanEntity", "com.OrphanEntity", "f2", 1, "", 0));
+
+        var candidates = store.findDeadNodeCandidates(null);
+        var byName = candidates.stream().collect(java.util.stream.Collectors.toMap(c -> c.node().name(), c -> c));
+        assertThat(byName.get("OrphanService").confidence()).isEqualTo(DeadCodeConfidence.HIGH);
+        assertThat(byName.get("OrphanEntity").confidence()).isEqualTo(DeadCodeConfidence.MEDIUM);
+    }
+
+    @Test
+    void findDeadNodeCandidates_respectsTypeFilter() {
+        store.saveNode(new Node("n1", NodeType.CONTROLLER, "Ctrl", "com.Ctrl", "f1", 1, "", 0));
+        store.saveNode(new Node("n2", NodeType.SERVICE, "Svc", "com.Svc", "f2", 1, "", 0));
+
+        var candidates = store.findDeadNodeCandidates(NodeType.SERVICE);
+        assertThat(candidates).extracting(c -> c.node().name()).containsExactly("Svc");
+    }
+
     // ---- co_change tests ----
 
     @Test
