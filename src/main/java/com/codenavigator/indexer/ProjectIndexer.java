@@ -48,10 +48,11 @@ public class ProjectIndexer {
         // 0. Start from empty. Edge ids are random UUIDs and method rows are autoincrement, so
         // INSERT OR REPLACE cannot dedupe either: without this, a second `init` over an existing
         // database doubles every edge (25,823 -> 52,088 on nlp) and every traversal silently
-        // reports each neighbour twice. Nodes are keyed by id and so replace cleanly, though a
-        // node whose file has since been deleted survives until indexIncremental prunes it.
+        // reports each neighbour twice. Nodes are keyed by id and so replace cleanly; a node
+        // whose file has since been deleted or moved is pruned below.
         store.deleteAllEdges();
         store.deleteAllMethods();
+        pruneDeletedFiles(projectPath);
 
         // 1. Detect project type
         Project project = projectDetector.detect(projectPath);
@@ -171,6 +172,7 @@ public class ProjectIndexer {
         boolean anyChanged = reindexChangedJavaFiles(javaFiles, projectPath, nodeExtractor);
         anyChanged |= reindexChangedTsFiles(tsFiles);
         anyChanged |= reindexChangedGroovyFiles(groovyFiles);
+        anyChanged |= pruneDeletedFiles(projectPath);
 
         // 4. Full edge re-extraction if anything changed
         if (anyChanged) {
@@ -377,6 +379,26 @@ public class ProjectIndexer {
             }
         }
         return anyChanged;
+    }
+
+    /**
+     * Drop nodes and tracking rows for files that were indexed earlier but no longer exist on disk.
+     * Tracked paths are relative for Java files and absolute for TS/Groovy files (see trackFile),
+     * and older indexes stored "./"-prefixed relative paths; resolve non-absolute ones against
+     * projectPath. Returns true if anything was pruned, so callers re-extract edges.
+     */
+    private boolean pruneDeletedFiles(Path projectPath) {
+        boolean anyPruned = false;
+        for (String tracked : store.getAllIndexedFiles()) {
+            Path p = Path.of(tracked);
+            if (!p.isAbsolute()) p = projectPath.resolve(tracked);
+            if (!Files.exists(p)) {
+                store.deleteNodesByFilePath(tracked);
+                store.removeIndexedFile(tracked);
+                anyPruned = true;
+            }
+        }
+        return anyPruned;
     }
 
     /**

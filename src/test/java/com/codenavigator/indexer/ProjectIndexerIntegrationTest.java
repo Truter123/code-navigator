@@ -119,6 +119,36 @@ class ProjectIndexerIntegrationTest {
     }
 
     @Test
+    void incrementalIndexPrunesDeletedFiles() throws Exception {
+        var projectPath = tempDir.resolve("prune-project");
+        var fooFile = projectPath.resolve("src/main/java/com/sample/Foo.java");
+        var barFile = projectPath.resolve("src/main/java/com/sample/Bar.java");
+        Files.createDirectories(fooFile.getParent());
+        Files.writeString(fooFile, """
+            package com.sample;
+            public class Foo {}
+            """);
+        Files.writeString(barFile, """
+            package com.sample;
+            public class Bar {}
+            """);
+
+        indexer.indexFull(projectPath);
+        var barTrackedPath = projectPath.relativize(barFile).toString();
+        assertThat(store.findNodesByFilePath(barTrackedPath)).isNotEmpty();
+        var fooTrackedPath = projectPath.relativize(fooFile).toString();
+        assertThat(store.findNodesByFilePath(fooTrackedPath)).isNotEmpty();
+
+        Files.delete(barFile);
+        indexer.indexIncremental(projectPath);
+
+        assertThat(store.findNodesByFilePath(barTrackedPath)).isEmpty();
+        assertThat(store.getAllIndexedFiles()).doesNotContain(barTrackedPath);
+        assertThat(store.findNodesByFilePath(fooTrackedPath)).isNotEmpty();
+        assertThat(store.getAllIndexedFiles()).contains(fooTrackedPath);
+    }
+
+    @Test
     void indexesGroovyScriptsAlongsideJava() throws Exception {
         var proj = tempDir.resolve("mixed-proj");
         var javaDir = proj.resolve("src/main/java/com/demo");
