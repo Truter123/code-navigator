@@ -1,6 +1,7 @@
 package com.codenavigator.git;
 
 import com.codenavigator.graph.GraphStore;
+import com.codenavigator.indexer.ProjectIndexer;
 import org.eclipse.jgit.api.Git;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -109,6 +110,28 @@ class GitHistoryAnalyzerTest {
     void analyze_nonGitDirectory_doesNotThrow(@TempDir Path nonGitDir) {
         var analyzer = new GitHistoryAnalyzer(store);
         assertThatNoException().isThrownBy(() -> analyzer.analyze(nonGitDir, 500));
+    }
+
+    @Test
+    void secondFullIndexDoesNotDoubleCoChangeCounts() throws Exception {
+        // Two commits, each touching the same pair of files.
+        writeAndCommit("c1", "src/A.java", "src/B.java");
+        writeAndCommit("c2", "src/A.java", "src/B.java");
+
+        var indexer = new ProjectIndexer(store);
+        indexer.indexFull(repoDir);
+        var afterFirstRun = store.topCoupled("src/A.java", 10);
+        var abPairAfterFirst = afterFirstRun.stream()
+            .filter(p -> p.otherFile().equals("src/B.java")).findFirst();
+        assertThat(abPairAfterFirst).isPresent();
+        assertThat(abPairAfterFirst.get().count()).isEqualTo(2);
+
+        indexer.indexFull(repoDir);
+        var afterSecondRun = store.topCoupled("src/A.java", 10);
+        var abPairAfterSecond = afterSecondRun.stream()
+            .filter(p -> p.otherFile().equals("src/B.java")).findFirst();
+        assertThat(abPairAfterSecond).isPresent();
+        assertThat(abPairAfterSecond.get().count()).isEqualTo(2);
     }
 
     @Test

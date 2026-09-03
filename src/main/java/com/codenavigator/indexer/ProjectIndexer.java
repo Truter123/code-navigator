@@ -96,23 +96,7 @@ public class ProjectIndexer {
         }
         });
 
-        // Phase 1c: Extract methods from Java files (signature rows + METHOD nodes)
-        store.batch(() -> {
-        for (Path file : javaFiles) {
-            try {
-                var cu = StaticJavaParser.parse(file);
-                var filePath = projectPath.relativize(file).toString();
-                long lastModified = Files.getLastModifiedTime(file).toMillis();
-                var fileNodes = store.findNodesByFilePath(filePath);
-                saveMethods(methodExtractor.extract(cu, fileNodes, filePath, lastModified));
-            } catch (Exception e) {
-                // Skip unparseable files
-            }
-        }
-        });
-
-        // 4. Phase 1b: Extract nodes from TS files, then their methods
-        var tsMethods = new ArrayList<TypeScriptMethodExtractor.TsMethod>();
+        // 4. Phase 1b: Extract nodes from TS files
         store.batch(() -> {
             for (Path file : tsFiles) {
                 var nodes = tsIndexer.indexFile(file);
@@ -120,7 +104,6 @@ public class ProjectIndexer {
                     store.saveNode(node);
                     embedNode(node);
                 }
-                tsMethods.addAll(saveTsMethods(file, nodes));
             }
         });
 
@@ -133,15 +116,16 @@ public class ProjectIndexer {
             }
         }
 
-        // 5. Phase 2: Extract edges
-        extractAndSaveEdges(javaFiles, projectPath, edgeExtractor);
-        extractFeEdges();
-        extractTsCallEdges(tsMethods);
+        // 5. Phase 2: Methods, then edges (same rebuild indexIncremental re-runs on any change)
+        rebuildEdgesAndMethods(javaFiles, tsFiles, projectPath, edgeExtractor);
 
         // 6. Track indexed files
         trackFiles(projectPath, javaFiles, tsFiles, groovyFiles);
 
-        // 7. Mine git co-change coupling (silently skipped if not a git repo)
+        // 7. Mine git co-change coupling (silently skipped if not a git repo). upsertCoChange
+        // increments an existing count, so without clearing first a second indexFull doubles
+        // every pair count.
+        store.deleteAllCoChange();
         var gitAnalyzer = new GitHistoryAnalyzer(store);
         gitAnalyzer.analyze(projectPath, 500);
         if (gitAnalyzer.skippedBulkCommits() > 0) {
@@ -174,15 +158,56 @@ public class ProjectIndexer {
         anyChanged |= reindexChangedGroovyFiles(groovyFiles);
         anyChanged |= pruneDeletedFiles(projectPath);
 
-        // 4. Full edge re-extraction if anything changed
+        // 4. Full methods + edge re-extraction if anything changed, mirroring indexFull exactly
+        // so a sync never leaves the graph in a state a full index couldn't also produce.
         if (anyChanged) {
-            store.deleteAllEdges();
-            extractAndSaveEdges(javaFiles, projectPath, edgeExtractor);
-            extractFeEdges();
+            rebuildEdgesAndMethods(javaFiles, tsFiles, projectPath, edgeExtractor);
         }
 
         // 5. Update tracked files
         trackFiles(projectPath, javaFiles, tsFiles, groovyFiles);
+    }
+
+    /**
+     * Re-derive every method (signature rows + METHOD nodes) and every edge from scratch, exactly
+     * as indexFull does. Edge ids are random UUIDs and method rows autoincrement, so neither
+     * dedupes on insert: without clearing both tables first, a rebuild after a sync would double
+     * every DECLARES_METHOD edge and append duplicate method signature rows. Called from indexFull
+     * and from indexIncremental whenever anything changed, so a sync can never diverge from what a
+     * full index would produce.
+     */
+    private void rebuildEdgesAndMethods(List<Path> javaFiles, List<Path> tsFiles, Path projectPath,
+                                        EdgeExtractor edgeExtractor) {
+        store.deleteAllEdges();
+        store.deleteAllMethods();
+
+        // Methods from Java files (signature rows + METHOD nodes)
+        store.batch(() -> {
+        for (Path file : javaFiles) {
+            try {
+                var cu = StaticJavaParser.parse(file);
+                var filePath = projectPath.relativize(file).toString();
+                long lastModified = Files.getLastModifiedTime(file).toMillis();
+                var fileNodes = store.findNodesByFilePath(filePath);
+                saveMethods(methodExtractor.extract(cu, fileNodes, filePath, lastModified));
+            } catch (Exception e) {
+                // Skip unparseable files
+            }
+        }
+        });
+
+        // Methods from TS files
+        var tsMethods = new ArrayList<TypeScriptMethodExtractor.TsMethod>();
+        store.batch(() -> {
+            for (Path file : tsFiles) {
+                var nodes = store.findNodesByFilePath(file.toString());
+                tsMethods.addAll(saveTsMethods(file, nodes));
+            }
+        });
+
+        extractAndSaveEdges(javaFiles, projectPath, edgeExtractor);
+        extractFeEdges();
+        extractTsCallEdges(tsMethods);
     }
 
     // ---- Shared extraction helpers ----

@@ -231,11 +231,22 @@ public class CodeNavigatorMcpServer {
         String symbol = (String) args.get("symbol");
         String nodeId = resolveSymbol(scope.store(), symbol);
         if (nodeId == null) return "Symbol '" + symbol + "' not found.";
+        int limit = getIntArg(args, "limit", 30);
 
         var start = scope.store().findNodeById(nodeId).orElse(null);
         var nodes = applyGranularity(scope.traversal().traceChain(nodeId), args, start);
-        return ambiguityNote(candidatesFor(scope.store(), symbol))
-            + formatGroupedByType("Chain for " + symbol, nodes);
+        int total = nodes.size();
+        var shown = total > limit ? nodes.subList(0, limit) : nodes;
+        String title = "Chain for " + symbol + (total > limit ? " (showing " + limit + " of " + total + ")" : "");
+
+        var sb = new StringBuilder();
+        sb.append(ambiguityNote(candidatesFor(scope.store(), symbol)));
+        sb.append(formatGroupedByType(title, shown));
+        if (total > limit) {
+            sb.append("\n… ").append(total - limit)
+              .append(" more. Raise `limit` or a narrower `granularity`/`depth`.\n");
+        }
+        return sb.toString();
     }
 
     String handleCgImpact(Map<String, Object> args) {
@@ -243,6 +254,7 @@ public class CodeNavigatorMcpServer {
         var store = scope.store();
         String symbol = (String) args.get("symbol");
         int depth = getIntArg(args, "depth", 2);
+        int limit = getIntArg(args, "limit", 30);
         String nodeId = resolveSymbol(store, symbol);
         if (nodeId == null) return "Symbol '" + symbol + "' not found.";
 
@@ -260,14 +272,20 @@ public class CodeNavigatorMcpServer {
         var sb = new StringBuilder();
         sb.append("## Impact of ").append(symbol).append(" (depth ").append(depth).append(")\n\n");
         sb.append(ambiguityNote(candidatesFor(store, symbol)));
-        sb.append(nodes.size()).append(" affected node(s):\n\n");
-        for (var node : nodes) {
+        sb.append(nodes.size()).append(" affected node(s)");
+        if (nodes.size() > limit) sb.append(" (showing ").append(limit).append(")");
+        sb.append(":\n\n");
+        nodes.stream().limit(limit).forEach(node -> {
             String line = formatNodeLine(node);
             int coCount = coChangeByFile.getOrDefault(node.filePath(), 0);
             if (coCount > 0) {
                 line += " _(co-change: " + coCount + " commit(s))_";
             }
             sb.append(line).append("\n");
+        });
+        if (nodes.size() > limit) {
+            sb.append("\n… ").append(nodes.size() - limit)
+              .append(" more. Raise `limit` or narrow the `depth`.\n");
         }
         return sb.toString();
     }
@@ -593,15 +611,21 @@ public class CodeNavigatorMcpServer {
 
         if (filePath == null) return "Provide either 'symbol' or 'file'.";
 
-        var coupled = store.topCoupled(filePath, limit);
+        var coupled = store.topCoupled(filePath, limit + 1);
         if (coupled.isEmpty()) return "No co-change data for: " + filePath;
+
+        boolean hasMore = coupled.size() > limit;
+        var shown = hasMore ? coupled.subList(0, limit) : coupled;
 
         var sb = new StringBuilder();
         sb.append("## Co-change coupling for `").append(filePath).append("`\n\n");
-        sb.append("Top ").append(coupled.size()).append(" historically co-changed file(s):\n\n");
-        for (int i = 0; i < coupled.size(); i++) {
-            var pair = coupled.get(i);
+        sb.append("Top ").append(shown.size()).append(" historically co-changed file(s):\n\n");
+        for (int i = 0; i < shown.size(); i++) {
+            var pair = shown.get(i);
             sb.append(String.format(" %d. `%s` — %d commit(s)%n", i + 1, pair.otherFile(), pair.count()));
+        }
+        if (hasMore) {
+            sb.append("\n… more co-changed file(s). Raise `limit`.\n");
         }
         return sb.toString();
     }
@@ -679,6 +703,8 @@ public class CodeNavigatorMcpServer {
             }
         }
 
+        int limit = getIntArg(args, "limit", 10);
+
         var candidates = resolveScope(args).store().findDeadNodeCandidates(typeFilter);
         if (candidates.isEmpty()) return "No dead-code candidates found.";
 
@@ -687,6 +713,7 @@ public class CodeNavigatorMcpServer {
 
         var sb = new StringBuilder();
         sb.append("## Dead-Code Candidates (ranked, not a delete list — confirm manually)\n\n");
+        int shown = 0;
         for (var tier : DEAD_CODE_TIER_ORDER) {
             var inTier = byTier.get(tier);
             if (inTier == null || inTier.isEmpty()) continue;
@@ -697,8 +724,10 @@ public class CodeNavigatorMcpServer {
             for (var entry : byType.entrySet()) {
                 sb.append("**").append(entry.getKey()).append("** (").append(entry.getValue().size()).append(")\n");
                 for (var candidate : entry.getValue()) {
+                    if (shown >= limit) continue;
                     var node = candidate.node();
                     sb.append("- `").append(node.name()).append("` (").append(node.filePath()).append(":").append(node.lineNumber()).append(")\n");
+                    shown++;
                 }
             }
             sb.append("\n");
@@ -706,6 +735,10 @@ public class CodeNavigatorMcpServer {
         sb.append("Total: ").append(candidates.size()).append(" candidates. ")
           .append("Nodes referenced only through a live IMPLEMENTS/EXTENDS supertype are excluded entirely — ")
           .append("they're not dead, callers just depend on the interface.\n");
+        if (candidates.size() > shown) {
+            sb.append("\n… ").append(candidates.size() - shown)
+              .append(" more candidate line(s) not shown. Raise `limit`.\n");
+        }
         return sb.toString();
     }
 
@@ -713,6 +746,7 @@ public class CodeNavigatorMcpServer {
         var scope = resolveScope(args);
         var store = scope.store();
         String pattern = args.containsKey("pattern") ? (String) args.get("pattern") : null;
+        int limit = getIntArg(args, "limit", 30);
 
         var files = store.getAllIndexedFiles();
         if (pattern != null && !pattern.isEmpty()) {
@@ -722,10 +756,16 @@ public class CodeNavigatorMcpServer {
 
         var sb = new StringBuilder();
         sb.append("## Indexed Files\n\n");
-        sb.append(files.size()).append(" file(s):\n\n");
-        for (var file : files) {
+        sb.append(files.size()).append(" file(s)");
+        if (files.size() > limit) sb.append(" (showing ").append(limit).append(")");
+        sb.append(":\n\n");
+        files.stream().limit(limit).forEach(file -> {
             var nodes = store.findNodesByFilePath(file);
             sb.append("- ").append(file).append(" (").append(nodes.size()).append(" nodes)\n");
+        });
+        if (files.size() > limit) {
+            sb.append("\n… ").append(files.size() - limit)
+              .append(" more. Raise `limit` or narrow `pattern`.\n");
         }
         return sb.toString();
     }

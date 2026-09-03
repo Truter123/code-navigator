@@ -787,6 +787,18 @@ public class GraphStore implements AutoCloseable {
     public record CoChangePair(String otherFile, int count) {}
 
     /**
+     * Clear mined co-change pairs. upsertCoChange increments an existing count, so a second index
+     * run doubles every pair unless the table is emptied first.
+     */
+    public void deleteAllCoChange() {
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("DELETE FROM co_change");
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to delete co-change data", e);
+        }
+    }
+
+    /**
      * Upserts a co-change observation between two files.
      * Always stores canonical ordering (file_a < file_b).
      */

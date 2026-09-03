@@ -614,6 +614,70 @@ class CodeNavigatorMcpServerTest {
         assertThat(result).contains("LIBRARY");
     }
 
+    // ---- limit honoured (S3) ----
+
+    @Test
+    void cgImpact_honoursLimit() {
+        var result = mcpServer.handleCgImpact(Map.of("symbol", "OrderCreatedEvent", "depth", 1, "limit", 1));
+
+        long bulletLines = result.lines().filter(l -> l.startsWith("- **")).count();
+        assertThat(bulletLines).isEqualTo(1);
+        assertThat(result).contains("more").contains("Raise `limit`");
+    }
+
+    @Test
+    void cgChain_honoursLimit() {
+        var result = mcpServer.handleCgChain(Map.of("symbol", "CreateOrderCommand", "limit", 1));
+
+        long bulletLines = result.lines().filter(l -> l.startsWith("- `")).count();
+        assertThat(bulletLines).isEqualTo(1);
+        assertThat(result).contains("more").contains("Raise `limit`");
+    }
+
+    @Test
+    void cgFiles_honoursLimit() {
+        store.saveIndexedFile("Ctrl.java", 0L, "");
+        store.saveIndexedFile("Cmd.java", 0L, "");
+        store.saveIndexedFile("H.java", 0L, "");
+        store.saveIndexedFile("Order.java", 0L, "");
+        store.saveIndexedFile("Event.java", 0L, "");
+        store.saveIndexedFile("Proj.java", 0L, "");
+        store.saveIndexedFile("View.java", 0L, "");
+
+        var result = mcpServer.handleCgFiles(Map.of("limit", 1));
+
+        long bulletLines = result.lines().filter(l -> l.startsWith("- ")).count();
+        assertThat(bulletLines).isEqualTo(1);
+        assertThat(result).contains("more").contains("Raise `limit`");
+    }
+
+    @Test
+    void cgDead_honoursLimit() {
+        store.saveNode(new Node("com.DeadServiceA", NodeType.SERVICE, "DeadServiceA",
+            "com.DeadServiceA", "DeadA.java", 1, "class DeadServiceA", 0));
+        store.saveNode(new Node("com.DeadServiceB", NodeType.SERVICE, "DeadServiceB",
+            "com.DeadServiceB", "DeadB.java", 1, "class DeadServiceB", 0));
+
+        var result = mcpServer.handleCgDead(Map.of("limit", 1));
+
+        long bulletLines = result.lines().filter(l -> l.startsWith("- `")).count();
+        assertThat(bulletLines).isEqualTo(1);
+        assertThat(result).contains("more candidate line(s) not shown").contains("Raise `limit`");
+    }
+
+    @Test
+    void cgCoupling_honoursLimit() {
+        store.upsertCoChange("Ctrl.java", "Cmd.java");
+        store.upsertCoChange("Ctrl.java", "Cmd.java");
+        store.upsertCoChange("Ctrl.java", "H.java");
+
+        var result = mcpServer.handleCgCoupling(Map.of("symbol", "OrderController", "limit", 1));
+
+        long bulletLines = result.lines().filter(l -> l.matches("^\\s*\\d+\\..*")).count();
+        assertThat(bulletLines).isEqualTo(1);
+        assertThat(result).contains("more co-changed file(s)").contains("Raise `limit`");
+    }
+
     @Test
     void cgImpactIncludesLibraryNodes() {
         // Add a LIBRARY node and USES_LIBRARY edges from two different nodes
