@@ -44,6 +44,30 @@ class MethodExtractorTest {
     }
 
     @Test
+    void noClassLevelRequestMappingUsesMethodPathAlone() throws Exception {
+        // No @RequestMapping on the class: basePath is null and extractHttpAnnotation must not
+        // prepend "null" to the method's own path.
+        var cu = StaticJavaParser.parse(
+            "package com.sample;" +
+            "import org.springframework.web.bind.annotation.RestController;" +
+            "import org.springframework.web.bind.annotation.GetMapping;" +
+            "@RestController" +
+            "public class BareController {" +
+            "  @GetMapping(\"/bare\")" +
+            "  public Object bare() { return null; }" +
+            "  public Object helper() { return null; }" +
+            "}");
+        var node = new Node("com.sample.BareController", NodeType.CONTROLLER,
+            "BareController", "com.sample.BareController", "BareController.java", 1, "", 0);
+
+        var methods = records(extractor.extract(cu, List.of(node), "BareController.java", 0L));
+
+        assertThat(methods).anyMatch(m -> m.name().equals("bare") && "GET /bare".equals(m.annotations()));
+        // A method with no HTTP annotation is not an endpoint: no annotations text at all.
+        assertThat(methods).anyMatch(m -> m.name().equals("helper") && m.annotations() == null);
+    }
+
+    @Test
     void extractsServicePublicMethods() throws Exception {
         var cu = StaticJavaParser.parse(Path.of(
             "src/test/resources/sample-spring/src/main/java/com/sample/service/GameTypeService.java"));
