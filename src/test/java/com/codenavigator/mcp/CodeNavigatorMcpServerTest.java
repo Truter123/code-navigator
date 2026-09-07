@@ -1,6 +1,5 @@
 package com.codenavigator.mcp;
 
-import com.codenavigator.embedding.NoopEmbeddingProvider;
 import com.codenavigator.graph.*;
 import com.codenavigator.search.SearchService;
 import org.junit.jupiter.api.*;
@@ -23,7 +22,7 @@ class CodeNavigatorMcpServerTest {
         store = new GraphStore(tempDir.resolve("test.db"));
         var traversal = new GraphTraversal(store);
         var search = new SearchService(store, traversal);
-        mcpServer = new CodeNavigatorMcpServer(store, traversal, search, new NoopEmbeddingProvider());
+        mcpServer = new CodeNavigatorMcpServer(store, traversal, search);
         buildTestGraph();
     }
 
@@ -133,6 +132,33 @@ class CodeNavigatorMcpServerTest {
         var result = mcpServer.handleCgNode(Map.of("symbol", "Order", "includeCode", "false"));
         assertThat(result).contains("AGGREGATE");
         assertThat(result).doesNotContain("class Order extends AggregateRoot");
+    }
+
+    @Test
+    void cgNodeListsControllerEndpoints() {
+        // The class-level base path is already folded into methods.annotations by MethodExtractor,
+        // so cg_node only has to render, sort by path, and skip methods with no HTTP annotation.
+        store.saveMethod(new GraphStore.MethodRecord("com.OrderController", "create",
+            "Order", "CreateOrderCommand cmd", "POST /orders", "public"));
+        store.saveMethod(new GraphStore.MethodRecord("com.OrderController", "get",
+            "Order", "String id", "GET /orders/{id}", "public"));
+        store.saveMethod(new GraphStore.MethodRecord("com.OrderController", "helper",
+            "void", "", null, "private"));
+
+        var result = mcpServer.handleCgNode(Map.of("symbol", "OrderController"));
+
+        assertThat(result).contains("### Endpoints");
+        assertThat(result).contains("GET /orders/{id} → get");
+        assertThat(result).contains("POST /orders → create");
+        assertThat(result).doesNotContain("helper");
+        // Sorted by path: /orders before /orders/{id}.
+        assertThat(result.indexOf("POST /orders →")).isLessThan(result.indexOf("GET /orders/{id} →"));
+    }
+
+    @Test
+    void cgNodeOmitsEndpointsSectionForNonController() {
+        var result = mcpServer.handleCgNode(Map.of("symbol", "Order"));
+        assertThat(result).doesNotContain("### Endpoints");
     }
 
     @Test

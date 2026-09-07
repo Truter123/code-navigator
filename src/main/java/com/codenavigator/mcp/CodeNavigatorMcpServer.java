@@ -1,7 +1,6 @@
 package com.codenavigator.mcp;
 
 import com.codenavigator.cli.ProjectPaths;
-import com.codenavigator.embedding.EmbeddingProvider;
 import com.codenavigator.export.ExportService;
 import com.codenavigator.graph.*;
 import com.codenavigator.search.SearchService;
@@ -37,16 +36,13 @@ public class CodeNavigatorMcpServer {
     }
 
     private final ProjectScope defaultScope;
-    private final EmbeddingProvider embeddingProvider;
     private final ExportService exportService = new ExportService();
     private final Map<String, ProjectScope> scopes = new HashMap<>();
 
-    public CodeNavigatorMcpServer(GraphStore store, GraphTraversal traversal, SearchService searchService,
-                                  EmbeddingProvider embeddingProvider) {
+    public CodeNavigatorMcpServer(GraphStore store, GraphTraversal traversal, SearchService searchService) {
         var env = System.getenv("CODE_NAVIGATOR_PROJECT");
         this.defaultScope = new ProjectScope(store, traversal, searchService,
             Path.of(env != null ? env : "."));
-        this.embeddingProvider = embeddingProvider;
     }
 
     public void start() {
@@ -418,6 +414,31 @@ public class CodeNavigatorMcpServer {
         return sb.toString();
     }
 
+    /**
+     * A controller's handler methods as {@code VERB /path → methodName}, one line each, sorted by
+     * path. The class-level {@code @RequestMapping} base path is already folded into
+     * {@code methods.annotations} by {@link com.codenavigator.indexer.MethodExtractor}, so no
+     * further joining happens here. A method without an HTTP annotation (a helper, a constructor)
+     * is not an endpoint and is omitted.
+     */
+    private static void appendEndpoints(StringBuilder sb, GraphStore store, String nodeId) {
+        var endpoints = store.findMethodsByNodeId(nodeId).stream()
+            .filter(m -> m.annotations() != null && !m.annotations().isBlank())
+            .sorted(Comparator.comparing(m -> endpointPath(m.annotations())))
+            .toList();
+        if (endpoints.isEmpty()) return;
+
+        sb.append("\n### Endpoints\n");
+        for (var m : endpoints) {
+            sb.append("- ").append(m.annotations()).append(" → ").append(m.name()).append("\n");
+        }
+    }
+
+    private static String endpointPath(String annotation) {
+        int space = annotation.indexOf(' ');
+        return space < 0 ? annotation : annotation.substring(space + 1);
+    }
+
     private static void appendMethodEdges(StringBuilder sb, GraphStore store, String methodId,
                                           String heading, EdgeType type, boolean outgoing) {
         var edges = outgoing ? store.findEdgesFrom(methodId) : store.findEdgesTo(methodId);
@@ -509,6 +530,10 @@ public class CodeNavigatorMcpServer {
         sb.append("- **Type:** ").append(node.type()).append("\n");
         sb.append("- **Qualified name:** `").append(node.qualifiedName()).append("`\n");
         sb.append("- **File:** ").append(node.filePath()).append(":").append(node.lineNumber()).append("\n");
+
+        if (node.type() == NodeType.CONTROLLER) {
+            appendEndpoints(sb, store, nodeId);
+        }
 
         if (includeCode && node.codeSnippet() != null && !node.codeSnippet().isEmpty()) {
             sb.append("\n### Code\n```java\n").append(node.codeSnippet()).append("\n```\n");
@@ -926,7 +951,7 @@ public class CodeNavigatorMcpServer {
     private ProjectScope openScope(Path root) {
         var graphStore = new GraphStore(ProjectPaths.graphDb(root));
         var graphTraversal = new GraphTraversal(graphStore);
-        var search = new SearchService(graphStore, graphTraversal, embeddingProvider);
+        var search = new SearchService(graphStore, graphTraversal);
 
         return new ProjectScope(graphStore, graphTraversal, search, root);
     }

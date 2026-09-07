@@ -20,7 +20,7 @@ public class SyncCommand implements Runnable {
         }
 
         try (var store = new GraphStore(ProjectPaths.graphDb(projectPath))) {
-            var indexer = new ProjectIndexer(store, com.codenavigator.embedding.EmbeddingProviders.fromEnv());
+            var indexer = new ProjectIndexer(store);
             indexer.indexIncremental(projectPath);
             System.out.println("Sync complete.");
         }

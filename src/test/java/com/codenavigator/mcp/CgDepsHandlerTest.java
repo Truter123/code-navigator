@@ -1,6 +1,5 @@
 package com.codenavigator.mcp;
 
-import com.codenavigator.embedding.NoopEmbeddingProvider;
 import com.codenavigator.graph.*;
 import com.codenavigator.search.SearchService;
 import org.junit.jupiter.api.AfterEach;
@@ -24,7 +23,7 @@ class CgDepsHandlerTest {
         store = new GraphStore(tempDir.resolve("test.db"));
         var traversal = new GraphTraversal(store);
         var search = new SearchService(store, traversal);
-        mcpServer = new CodeNavigatorMcpServer(store, traversal, search, new NoopEmbeddingProvider());
+        mcpServer = new CodeNavigatorMcpServer(store, traversal, search);
         buildLibraryGraph();
     }
 
@@ -99,7 +98,7 @@ class CgDepsHandlerTest {
         var emptyStore = new GraphStore(tempDir.resolve("empty.db"));
         var emptyTraversal = new GraphTraversal(emptyStore);
         var emptySearch = new SearchService(emptyStore, emptyTraversal);
-        var emptyServer = new CodeNavigatorMcpServer(emptyStore, emptyTraversal, emptySearch, new NoopEmbeddingProvider());
+        var emptyServer = new CodeNavigatorMcpServer(emptyStore, emptyTraversal, emptySearch);
 
         var result = emptyServer.handleCgDeps(Map.of());
         assertThat(result).contains("No dependency");

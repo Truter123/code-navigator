@@ -27,9 +27,7 @@ public class StatusCommand implements Runnable {
             System.out.println("=== Code Navigator Status ===");
             System.out.println("Project: " + projectPath);
             System.out.println("Tier: " + (tier != null ? tier : "unknown"));
-            System.out.printf("Total: %d nodes, %d edges%n", totalNodes, totalEdges);
-            var embeddingCount = store.countEmbeddings();
-            System.out.printf("Embeddings: %d/%d nodes%n%n", embeddingCount, totalNodes);
+            System.out.printf("Total: %d nodes, %d edges%n%n", totalNodes, totalEdges);
 
             System.out.println("Nodes by type:");
             for (var type : NodeType.values()) {

@@ -22,23 +22,21 @@ public class ProjectIndexer {
     private final ProjectDetector projectDetector;
     private final TypeScriptIndexer tsIndexer;
     private final GroovyIndexer groovyIndexer;
+    private final DartIndexer dartIndexer;
     private final MethodExtractor methodExtractor;
     private final TypeScriptMethodExtractor tsMethodExtractor;
+    private final DartMethodExtractor dartMethodExtractor;
     private final DependencyParser dependencyParser;
-    private final com.codenavigator.embedding.EmbeddingProvider embeddingProvider;
 
     public ProjectIndexer(GraphStore store) {
-        this(store, new com.codenavigator.embedding.NoopEmbeddingProvider());
-    }
-
-    public ProjectIndexer(GraphStore store, com.codenavigator.embedding.EmbeddingProvider embeddingProvider) {
         this.store = store;
-        this.embeddingProvider = embeddingProvider;
         this.projectDetector = new ProjectDetector();
         this.tsIndexer = new TypeScriptIndexer();
         this.groovyIndexer = new GroovyIndexer();
+        this.dartIndexer = new DartIndexer();
         this.methodExtractor = new MethodExtractor();
         this.tsMethodExtractor = new TypeScriptMethodExtractor();
+        this.dartMethodExtractor = new DartMethodExtractor();
         this.dependencyParser = new DependencyParser();
     }
 
@@ -74,6 +72,7 @@ public class ProjectIndexer {
         List<Path> javaFiles = findJavaFiles(projectPath);
         List<Path> tsFiles = findTsFiles(projectPath);
         List<Path> groovyFiles = findGroovyFiles(projectPath);
+        List<Path> dartFiles = findDartFiles(projectPath);
 
         // 3. Phase 1: Extract nodes from Java files
         store.batch(() -> {
@@ -88,7 +87,6 @@ public class ProjectIndexer {
                             node.qualifiedName(), node.filePath(), node.lineNumber(),
                             node.codeSnippet(), lastModified);
                     store.saveNode(nodeWithTime);
-                    embedNode(nodeWithTime);
                 }
             } catch (Exception e) {
                 // Skip unparseable files
@@ -102,7 +100,6 @@ public class ProjectIndexer {
                 var nodes = tsIndexer.indexFile(file);
                 for (Node node : nodes) {
                     store.saveNode(node);
-                    embedNode(node);
                 }
             }
         });
@@ -112,15 +109,24 @@ public class ProjectIndexer {
             var nodes = groovyIndexer.indexFile(file);
             for (Node node : nodes) {
                 store.saveNode(node);
-                embedNode(node);
             }
         }
 
+        // 4c. Phase 1e: Extract nodes from Dart/Flutter files
+        store.batch(() -> {
+            for (Path file : dartFiles) {
+                var nodes = dartIndexer.indexFile(file);
+                for (Node node : nodes) {
+                    store.saveNode(node);
+                }
+            }
+        });
+
         // 5. Phase 2: Methods, then edges (same rebuild indexIncremental re-runs on any change)
-        rebuildEdgesAndMethods(javaFiles, tsFiles, projectPath, edgeExtractor);
+        rebuildEdgesAndMethods(javaFiles, tsFiles, dartFiles, projectPath, edgeExtractor);
 
         // 6. Track indexed files
-        trackFiles(projectPath, javaFiles, tsFiles, groovyFiles);
+        trackFiles(projectPath, javaFiles, tsFiles, groovyFiles, dartFiles);
 
         // 7. Mine git co-change coupling (silently skipped if not a git repo). upsertCoChange
         // increments an existing count, so without clearing first a second indexFull doubles
@@ -151,21 +157,23 @@ public class ProjectIndexer {
         List<Path> javaFiles = findJavaFiles(projectPath);
         List<Path> tsFiles = findTsFiles(projectPath);
         List<Path> groovyFiles = findGroovyFiles(projectPath);
+        List<Path> dartFiles = findDartFiles(projectPath);
 
         // 3. Re-index changed files
         boolean anyChanged = reindexChangedJavaFiles(javaFiles, projectPath, nodeExtractor);
         anyChanged |= reindexChangedTsFiles(tsFiles);
         anyChanged |= reindexChangedGroovyFiles(groovyFiles);
+        anyChanged |= reindexChangedDartFiles(dartFiles);
         anyChanged |= pruneDeletedFiles(projectPath);
 
         // 4. Full methods + edge re-extraction if anything changed, mirroring indexFull exactly
         // so a sync never leaves the graph in a state a full index couldn't also produce.
         if (anyChanged) {
-            rebuildEdgesAndMethods(javaFiles, tsFiles, projectPath, edgeExtractor);
+            rebuildEdgesAndMethods(javaFiles, tsFiles, dartFiles, projectPath, edgeExtractor);
         }
 
         // 5. Update tracked files
-        trackFiles(projectPath, javaFiles, tsFiles, groovyFiles);
+        trackFiles(projectPath, javaFiles, tsFiles, groovyFiles, dartFiles);
     }
 
     /**
@@ -176,8 +184,8 @@ public class ProjectIndexer {
      * and from indexIncremental whenever anything changed, so a sync can never diverge from what a
      * full index would produce.
      */
-    private void rebuildEdgesAndMethods(List<Path> javaFiles, List<Path> tsFiles, Path projectPath,
-                                        EdgeExtractor edgeExtractor) {
+    private void rebuildEdgesAndMethods(List<Path> javaFiles, List<Path> tsFiles, List<Path> dartFiles,
+                                        Path projectPath, EdgeExtractor edgeExtractor) {
         store.deleteAllEdges();
         store.deleteAllMethods();
 
@@ -205,9 +213,19 @@ public class ProjectIndexer {
             }
         });
 
+        // Methods from Dart files
+        var dartMethods = new ArrayList<DartMethodExtractor.DartMethod>();
+        store.batch(() -> {
+            for (Path file : dartFiles) {
+                var nodes = store.findNodesByFilePath(file.toString());
+                dartMethods.addAll(saveDartMethods(file, nodes));
+            }
+        });
+
         extractAndSaveEdges(javaFiles, projectPath, edgeExtractor);
         extractFeEdges();
         extractTsCallEdges(tsMethods);
+        extractDartEdges(dartFiles, dartMethods);
     }
 
     // ---- Shared extraction helpers ----
@@ -270,6 +288,64 @@ public class ProjectIndexer {
         System.err.printf("TypeScript call graph: %d method(s); %d/%d calls into project types "
                 + "bound (%.0f%%), %d into framework types.%n",
             tsMethods.size(), resolved, judged,
+            judged <= 0 ? 100.0 : (100.0 * resolved / judged), external);
+    }
+
+    /**
+     * Persist METHOD nodes and DECLARES_METHOD edges for one Dart file, returning what was found so
+     * the call pass can resolve against it once every class is in the graph.
+     */
+    private List<DartMethodExtractor.DartMethod> saveDartMethods(Path file, List<Node> classNodes) {
+        String content;
+        long lastModified;
+        try {
+            content = Files.readString(file);
+            lastModified = Files.getLastModifiedTime(file).toMillis();
+        } catch (IOException e) {
+            return List.of();
+        }
+
+        var found = dartMethodExtractor.extract(content, classNodes, file.toString(), lastModified);
+        for (var method : found) {
+            store.saveNode(method.node());
+            store.saveEdge(new Edge(UUID.randomUUID().toString(), EdgeType.DECLARES_METHOD,
+                method.ownerName(), method.node().id()));
+        }
+        return found;
+    }
+
+    /**
+     * Structural (EXTENDS/IMPLEMENTS) and call-graph edges for Dart, once every Dart class and
+     * method node exists.
+     */
+    private void extractDartEdges(List<Path> dartFiles, List<DartMethodExtractor.DartMethod> dartMethods) {
+        var knownTypes = new java.util.HashSet<String>();
+        for (Node n : store.getAllNodes()) {
+            if (n.type() != NodeType.METHOD) knownTypes.add(n.name());
+        }
+
+        store.batch(() -> {
+            for (Path file : dartFiles) {
+                for (Edge edge : dartIndexer.classEdges(file, knownTypes)) {
+                    store.saveEdge(edge);
+                }
+            }
+        });
+
+        if (dartMethods.isEmpty()) return;
+
+        var edges = dartMethodExtractor.resolveCalls(dartMethods, knownTypes);
+        store.batch(() -> {
+            for (Edge edge : edges) store.saveEdge(edge);
+        });
+
+        int seen = dartMethodExtractor.callSitesSeen();
+        int resolved = dartMethodExtractor.callSitesResolved();
+        int external = dartMethodExtractor.receiverExternal();
+        int judged = seen - external;
+        System.err.printf("Dart call graph: %d method(s); %d/%d calls into project types "
+                + "bound (%.0f%%), %d into framework/SDK types.%n",
+            dartMethods.size(), resolved, judged,
             judged <= 0 ? 100.0 : (100.0 * resolved / judged), external);
     }
 
@@ -352,7 +428,6 @@ public class ProjectIndexer {
                             node.qualifiedName(), node.filePath(), node.lineNumber(),
                             node.codeSnippet(), currentModified);
                     store.saveNode(nodeWithTime);
-                    embedNode(nodeWithTime);
                 }
 
                 // Re-extract methods for this file's nodes
@@ -376,7 +451,6 @@ public class ProjectIndexer {
                 var nodes = tsIndexer.indexFile(file);
                 for (Node node : nodes) {
                     store.saveNode(node);
-                    embedNode(node);
                 }
                 saveTsMethods(file, nodes);
             } catch (Exception e) {
@@ -397,8 +471,27 @@ public class ProjectIndexer {
                 var nodes = groovyIndexer.indexFile(file);
                 for (Node node : nodes) {
                     store.saveNode(node);
-                    embedNode(node);
                 }
+            } catch (Exception e) {
+                // Skip
+            }
+        }
+        return anyChanged;
+    }
+
+    private boolean reindexChangedDartFiles(List<Path> dartFiles) {
+        boolean anyChanged = false;
+        for (Path file : dartFiles) {
+            var filePath = file.toString();
+            try {
+                if (!isFileChanged(file, filePath)) continue;
+                anyChanged = true;
+                store.deleteNodesByFilePath(filePath);
+                var nodes = dartIndexer.indexFile(file);
+                for (Node node : nodes) {
+                    store.saveNode(node);
+                }
+                saveDartMethods(file, nodes);
             } catch (Exception e) {
                 // Skip
             }
@@ -515,6 +608,18 @@ public class ProjectIndexer {
                 file.toString().endsWith(".groovy") && !isExcluded(file));
     }
 
+    private List<Path> findDartFiles(Path projectPath) {
+        return findFiles(projectPath, file -> {
+            String name = file.toString();
+            return name.endsWith(".dart")
+                    && !name.endsWith(".g.dart")
+                    && !name.endsWith(".freezed.dart")
+                    && !name.contains("/l10n/") // flutter gen-l10n output
+                    && !name.contains(".dart_tool")
+                    && !isExcluded(file);
+        });
+    }
+
     private List<Path> findFiles(Path projectPath, Predicate<Path> filter) {
         var files = new ArrayList<Path>();
         try {
@@ -535,13 +640,14 @@ public class ProjectIndexer {
 
     private boolean isExcluded(Path file) {
         String path = file.toString();
-        return path.contains("build") || path.contains(".gradle") || path.contains("node_modules");
+        return path.contains("build") || path.contains(".gradle") || path.contains("node_modules")
+                || path.contains(".dart_tool");
     }
 
     // ---- File tracking ----
 
     private void trackFiles(Path projectPath, List<Path> javaFiles, List<Path> tsFiles,
-                            List<Path> groovyFiles) {
+                            List<Path> groovyFiles, List<Path> dartFiles) {
         for (Path file : javaFiles) {
             trackFile(projectPath, file);
         }
@@ -549,6 +655,9 @@ public class ProjectIndexer {
             trackFile(projectPath, file);
         }
         for (Path file : groovyFiles) {
+            trackFile(projectPath, file);
+        }
+        for (Path file : dartFiles) {
             trackFile(projectPath, file);
         }
     }
@@ -571,20 +680,6 @@ public class ProjectIndexer {
     private static void configureParser() {
         StaticJavaParser.getParserConfiguration()
                 .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17);
-    }
-
-    /** Embeds a node's text and stores the vector. Failures never break indexing. */
-    private void embedNode(Node node) {
-        try {
-            String text = node.name() + " " + node.qualifiedName()
-                + (node.codeSnippet() != null ? " " + node.codeSnippet() : "");
-            float[] vec = embeddingProvider.embed(text);
-            if (vec.length > 0) {
-                store.upsertEmbedding(node.id(), vec);
-            }
-        } catch (Exception e) {
-            // Embedding failures must never break indexing
-        }
     }
 
     private String computeChecksum(Path file) {

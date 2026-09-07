@@ -21,10 +21,9 @@ public class ServeCommand implements Runnable {
 
         var store = new GraphStore(ProjectPaths.graphDb(root));
         var traversal = new GraphTraversal(store);
-        var embeddingProvider = com.codenavigator.embedding.EmbeddingProviders.fromEnv();
-        var search = new SearchService(store, traversal, embeddingProvider);
+        var search = new SearchService(store, traversal);
 
-        var mcpServer = new CodeNavigatorMcpServer(store, traversal, search, embeddingProvider);
+        var mcpServer = new CodeNavigatorMcpServer(store, traversal, search);
         System.err.println("code-navigator MCP server started (stdio) — 9 tools, project " + root);
         mcpServer.start();
     }

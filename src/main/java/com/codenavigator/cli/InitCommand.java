@@ -19,7 +19,7 @@ public class InitCommand implements Runnable {
 
         System.out.println("Indexing project: " + projectPath);
         try (var store = new GraphStore(dbPath)) {
-            var indexer = new ProjectIndexer(store, com.codenavigator.embedding.EmbeddingProviders.fromEnv());
+            var indexer = new ProjectIndexer(store);
             indexer.indexFull(projectPath);
 
             var nodeCount = store.getAllNodes().size();

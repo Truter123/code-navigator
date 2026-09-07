@@ -30,7 +30,6 @@ dependencies {
     implementation 'com.github.javaparser:javaparser-symbol-solver-core:3.26.4'
     implementation 'org.xerial:sqlite-jdbc:3.47.2.0'
     implementation 'io.modelcontextprotocol.sdk:mcp:1.1.0'
-    implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
     implementation 'info.picocli:picocli:4.7.6'
     implementation 'org.eclipse.jgit:org.eclipse.jgit:7.2.0.202503040940-r'
     // Explicit no-op SLF4J binding: silences "No SLF4J providers were found" and,
