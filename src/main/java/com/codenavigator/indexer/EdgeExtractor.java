@@ -4,9 +4,17 @@ import com.codenavigator.graph.*;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.ConstructorDeclaration;
+import com.github.javaparser.ast.body.EnumDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
+import com.github.javaparser.ast.body.RecordDeclaration;
+import com.github.javaparser.ast.body.TypeDeclaration;
+import com.github.javaparser.ast.expr.AnnotationExpr;
 import com.github.javaparser.ast.expr.MethodCallExpr;
+import com.github.javaparser.ast.expr.NormalAnnotationExpr;
 import com.github.javaparser.ast.expr.ObjectCreationExpr;
+import com.github.javaparser.ast.expr.SingleMemberAnnotationExpr;
+import com.github.javaparser.ast.expr.StringLiteralExpr;
+import com.github.javaparser.ast.expr.TextBlockLiteralExpr;
 import com.github.javaparser.ast.type.ClassOrInterfaceType;
 import com.github.javaparser.ast.body.FieldDeclaration;
 import com.github.javaparser.ast.expr.FieldAccessExpr;
@@ -15,15 +23,23 @@ import com.github.javaparser.ast.expr.NameExpr;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class EdgeExtractor {
+
+    private static final Pattern TABLE_REF = Pattern.compile(
+        "\\b(?:FROM|JOIN|INTO|UPDATE)\\s+\"?([\\w.]+)\"?", Pattern.CASE_INSENSITIVE);
 
     private final Project tier;
     private final GraphStore store;
     private final List<Dependency> dependencies;
+    private final Set<String> sqlTables;
 
     /** Backward-compatible constructor: no library dependency awareness. */
     public EdgeExtractor(Project tier, GraphStore store) {
@@ -32,9 +48,20 @@ public class EdgeExtractor {
 
     /** Full constructor with library dependency list for boundary detection. */
     public EdgeExtractor(Project tier, GraphStore store, List<Dependency> dependencies) {
+        this(tier, store, dependencies, Set.of());
+    }
+
+    /**
+     * Full constructor, additionally aware of the lowercase SQL table names the run has already
+     * found, so {@code @Table}/{@code @Entity} annotations and FROM/JOIN/INTO/UPDATE literals can
+     * be matched into {@link EdgeType#REFERENCES_TABLE} edges. Built once per run by
+     * {@link ProjectIndexer} from every stored {@code SQL_TABLE} node, before the Java edge pass.
+     */
+    public EdgeExtractor(Project tier, GraphStore store, List<Dependency> dependencies, Set<String> sqlTables) {
         this.tier = tier;
         this.store = store;
         this.dependencies = dependencies;
+        this.sqlTables = sqlTables;
     }
 
     public List<Edge> extract(CompilationUnit cu, Node sourceNode) {
@@ -54,6 +81,7 @@ public class EdgeExtractor {
             extractImplements(decl, sourceNode, packageName, edges);
             extractExtends(decl, sourceNode, packageName, edges);
             extractReturnsType(decl, sourceNode, packageName, edges);
+            extractReferencesTable(decl, sourceNode, edges);
 
             // Project 2: Spring or DDD
             if (tier == Project.CRUD || tier == Project.DDD) {
@@ -74,12 +102,110 @@ public class EdgeExtractor {
             }
         });
 
+        cu.findAll(RecordDeclaration.class).forEach(decl -> {
+            var declName = decl.getNameAsString();
+            var qualifiedName = packageName.isEmpty() ? declName : packageName + "." + declName;
+            if (!qualifiedName.equals(sourceNode.qualifiedName())) return;
+            extractReferencesTable(decl, sourceNode, edges);
+        });
+
+        cu.findAll(EnumDeclaration.class).forEach(decl -> {
+            var declName = decl.getNameAsString();
+            var qualifiedName = packageName.isEmpty() ? declName : packageName + "." + declName;
+            if (!qualifiedName.equals(sourceNode.qualifiedName())) return;
+            extractReferencesTable(decl, sourceNode, edges);
+        });
+
         // Library boundary detection (all tiers, only when dependencies are supplied)
         if (!dependencies.isEmpty()) {
             extractUsesLibrary(cu, sourceNode, edges);
         }
 
         return edges;
+    }
+
+    // ── Table references (Java entities/queries -> SQL tables) ──
+
+    /**
+     * {@code @Table(name=...)}, {@code @Entity} (class name snake_cased), and every FROM/JOIN/
+     * INTO/UPDATE literal in the type (fields, methods, annotation values, text blocks) become
+     * candidate table names; only candidates present in the run's known SQL table set become
+     * edges. Self-persisted like {@link #extractUsesLibrary}, so a caller that only reads the
+     * returned list still sees the edge once (same id, so a second save by the pipeline is a
+     * no-op replace).
+     */
+    private void extractReferencesTable(TypeDeclaration<?> decl, Node source, List<Edge> edges) {
+        if (sqlTables.isEmpty()) return;
+
+        var candidates = new LinkedHashSet<String>();
+        tableCandidateFromAnnotations(decl).ifPresent(candidates::add);
+        decl.findAll(StringLiteralExpr.class).forEach(sl -> collectTableRefs(sl.getValue(), candidates));
+        decl.findAll(TextBlockLiteralExpr.class).forEach(tb -> collectTableRefs(tb.getValue(), candidates));
+
+        var emitted = new HashSet<String>();
+        for (String candidate : candidates) {
+            var lower = candidate.toLowerCase();
+            if (!sqlTables.contains(lower)) continue;
+            if (!emitted.add(lower)) continue;
+            var edge = new Edge(UUID.randomUUID().toString(),
+                EdgeType.REFERENCES_TABLE, source.id(), "sql:" + lower);
+            store.saveEdge(edge);
+            edges.add(edge);
+        }
+    }
+
+    private void collectTableRefs(String text, Set<String> candidates) {
+        if (text == null) return;
+        Matcher m = TABLE_REF.matcher(text);
+        while (m.find()) {
+            var raw = m.group(1).replace("\"", "");
+            var dot = raw.lastIndexOf('.');
+            candidates.add(dot >= 0 ? raw.substring(dot + 1) : raw);
+        }
+    }
+
+    /**
+     * {@code @Table(name = "x")} (with or without {@code schema}) names the table directly;
+     * {@code @Entity} with no usable {@code @Table} name falls back to the snake_case of the
+     * simple class name, stripping a trailing "Entity".
+     */
+    private Optional<String> tableCandidateFromAnnotations(TypeDeclaration<?> decl) {
+        Optional<String> fromTable = decl.getAnnotations().stream()
+            .filter(a -> a.getNameAsString().equals("Table"))
+            .findFirst()
+            .flatMap(this::tableNameMember);
+        if (fromTable.isPresent()) return fromTable;
+
+        boolean isEntity = decl.getAnnotations().stream()
+            .anyMatch(a -> a.getNameAsString().equals("Entity"));
+        if (!isEntity) return Optional.empty();
+
+        var simpleName = decl.getNameAsString();
+        if (simpleName.endsWith("Entity")) {
+            simpleName = simpleName.substring(0, simpleName.length() - "Entity".length());
+        }
+        return Optional.of(snakeCase(simpleName));
+    }
+
+    private Optional<String> tableNameMember(AnnotationExpr annotation) {
+        if (annotation instanceof NormalAnnotationExpr normal) {
+            return normal.getPairs().stream()
+                .filter(p -> p.getNameAsString().equals("name"))
+                .findFirst()
+                .filter(p -> p.getValue() instanceof StringLiteralExpr)
+                .map(p -> ((StringLiteralExpr) p.getValue()).getValue());
+        }
+        if (annotation instanceof SingleMemberAnnotationExpr single
+                && single.getMemberValue() instanceof StringLiteralExpr literal) {
+            return Optional.of(literal.getValue());
+        }
+        return Optional.empty();
+    }
+
+    private String snakeCase(String name) {
+        var s = name.replaceAll("([a-z0-9])([A-Z])", "$1_$2");
+        s = s.replaceAll("([A-Z]+)([A-Z][a-z])", "$1_$2");
+        return s.toLowerCase();
     }
 
     // ── Library boundary ──

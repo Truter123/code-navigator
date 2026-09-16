@@ -49,6 +49,9 @@ public class PythonIndexer implements LanguageIndexer {
     private static final Pattern SELF_CALL = Pattern.compile("\\bself\\.(\\w+)\\s*\\(");
     private static final Pattern BARE_CALL = Pattern.compile("(?<![\\w.])(\\w+)\\s*\\(");
 
+    private static final Pattern TABLE_REF = Pattern.compile(
+        "\\b(?:FROM|JOIN|INTO|UPDATE)\\s+\"?([\\w.]+)\"?", Pattern.CASE_INSENSITIVE);
+
     private static final Set<String> BUILTINS = Set.of(
         "print", "len", "range", "isinstance", "str", "int", "list", "dict", "set", "super",
         "open", "type", "enumerate", "zip", "sorted", "min", "max", "sum", "any", "all",
@@ -334,6 +337,41 @@ public class PythonIndexer implements LanguageIndexer {
                     continue;
                 }
                 if (BUILTINS.contains(name)) continue; // not shadowed by a same-file def
+            }
+        }
+
+        // REFERENCES_TABLE: same FROM/JOIN/INTO/UPDATE scan as the Java side, owner resolved to the
+        // innermost enclosing def/class/module by literal position (stripped text is content-length
+        // preserving, so def/class ranges and literal ranges from the same stripPython() call share
+        // one coordinate space).
+        for (int[] range : strip.literalRanges()) {
+            String literalText = content.substring(range[0], Math.min(range[1], content.length()));
+            Matcher tm = TABLE_REF.matcher(literalText);
+            while (tm.find()) {
+                String raw = tm.group(1).replace("\"", "").replace("'", "");
+                int dot = raw.lastIndexOf('.');
+                String candidate = (dot >= 0 ? raw.substring(dot + 1) : raw).toLowerCase();
+                if (!known.sqlTables().contains(candidate)) continue;
+
+                ResolvedDef bestDef = null;
+                for (ResolvedDef rd : resolvedDefs) {
+                    if (range[0] >= rd.def().headerStart() && range[0] < rd.def().blockEnd()) {
+                        if (bestDef == null || rd.def().headerStart() > bestDef.def().headerStart()) bestDef = rd;
+                    }
+                }
+                String owner;
+                if (bestDef != null) {
+                    owner = bestDef.methodId();
+                } else {
+                    ClassMatch bestClass = null;
+                    for (ClassMatch cls : classes) {
+                        if (range[0] >= cls.headerStart() && range[0] < cls.blockEnd()) {
+                            if (bestClass == null || cls.headerStart() > bestClass.headerStart()) bestClass = cls;
+                        }
+                    }
+                    owner = bestClass != null ? classIdByName.get(bestClass.name()) : module.id();
+                }
+                addEdge(edges, dedupe, EdgeType.REFERENCES_TABLE, owner, "sql:" + candidate);
             }
         }
 

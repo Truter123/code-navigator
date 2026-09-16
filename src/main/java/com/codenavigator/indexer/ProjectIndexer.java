@@ -69,7 +69,6 @@ public class ProjectIndexer {
         store.setConfig("dependencies", depsJson);
 
         var nodeExtractor = new NodeExtractor(project);
-        var edgeExtractor = new EdgeExtractor(project, store, dependencies);
 
         // 2. Find all files
         List<Path> javaFiles = findJavaFiles(projectPath);
@@ -139,7 +138,7 @@ public class ProjectIndexer {
         });
 
         // 5. Phase 2: Methods, then edges (same rebuild indexIncremental re-runs on any change)
-        rebuildEdgesAndMethods(javaFiles, tsFiles, dartFiles, extraFilesByIndexer, projectPath, edgeExtractor);
+        rebuildEdgesAndMethods(javaFiles, tsFiles, dartFiles, extraFilesByIndexer, projectPath, project, dependencies);
 
         // 6. Track indexed files
         trackFiles(projectPath, javaFiles, tsFiles, groovyFiles, dartFiles, extraFilesByIndexer);
@@ -167,7 +166,6 @@ public class ProjectIndexer {
         List<Dependency> dependencies = dependencyParser.parse(projectPath);
 
         var nodeExtractor = new NodeExtractor(project);
-        var edgeExtractor = new EdgeExtractor(project, store, dependencies);
 
         // 2. Find all files
         List<Path> javaFiles = findJavaFiles(projectPath);
@@ -187,7 +185,7 @@ public class ProjectIndexer {
         // 4. Full methods + edge re-extraction if anything changed, mirroring indexFull exactly
         // so a sync never leaves the graph in a state a full index couldn't also produce.
         if (anyChanged) {
-            rebuildEdgesAndMethods(javaFiles, tsFiles, dartFiles, extraFilesByIndexer, projectPath, edgeExtractor);
+            rebuildEdgesAndMethods(javaFiles, tsFiles, dartFiles, extraFilesByIndexer, projectPath, project, dependencies);
         }
 
         // 5. Update tracked files
@@ -201,12 +199,20 @@ public class ProjectIndexer {
      * every DECLARES_METHOD edge and append duplicate method signature rows. Called from indexFull
      * and from indexIncremental whenever anything changed, so a sync can never diverge from what a
      * full index would produce.
+     *
+     * <p>{@link KnownNames} (the SQL table set for {@link EdgeType#REFERENCES_TABLE}) is built once
+     * here, from every {@code SQL_TABLE} node already in the store, before the Java edge pass —
+     * both {@link #indexFull} and {@link #indexIncremental} save extra-language nodes (SQL included)
+     * before calling this method, so the table set is always complete by this point.</p>
      */
     private void rebuildEdgesAndMethods(List<Path> javaFiles, List<Path> tsFiles, List<Path> dartFiles,
                                         Map<LanguageIndexer, List<Path>> extraFilesByIndexer,
-                                        Path projectPath, EdgeExtractor edgeExtractor) {
+                                        Path projectPath, Project project, List<Dependency> dependencies) {
         store.deleteAllEdges();
         store.deleteAllMethods();
+
+        var known = buildKnownNames();
+        var edgeExtractor = new EdgeExtractor(project, store, dependencies, known.sqlTables());
 
         // Methods from Java files (signature rows + METHOD nodes)
         store.batch(() -> {
@@ -245,7 +251,16 @@ public class ProjectIndexer {
         extractFeEdges();
         extractTsCallEdges(tsMethods);
         extractDartEdges(dartFiles, dartMethods);
-        extractExtraLanguageEdges(extraFilesByIndexer, projectPath);
+        extractExtraLanguageEdges(extraFilesByIndexer, projectPath, known);
+    }
+
+    /** The lowercase SQL table names every extra-language pass (Java, Python, shell) resolves against. */
+    private KnownNames buildKnownNames() {
+        var sqlTables = new java.util.HashSet<String>();
+        for (Node n : store.findNodesByType(NodeType.SQL_TABLE)) {
+            sqlTables.add(n.name());
+        }
+        return new KnownNames(sqlTables);
     }
 
     // ---- Shared extraction helpers ----
@@ -374,12 +389,8 @@ public class ProjectIndexer {
      * top-level node exists. Mirrors {@link #extractAndSaveEdges}: methods first so their nodes
      * exist, then {@code fileNodes} is re-read from the store so edge extraction sees both.
      */
-    private void extractExtraLanguageEdges(Map<LanguageIndexer, List<Path>> extraFilesByIndexer, Path projectPath) {
-        var sqlTables = new java.util.HashSet<String>();
-        for (Node n : store.findNodesByType(NodeType.SQL_TABLE)) {
-            sqlTables.add(n.name());
-        }
-        var known = new KnownNames(sqlTables);
+    private void extractExtraLanguageEdges(Map<LanguageIndexer, List<Path>> extraFilesByIndexer,
+                                           Path projectPath, KnownNames known) {
         for (var entry : extraFilesByIndexer.entrySet()) {
             LanguageIndexer indexer = entry.getKey();
             for (Path file : entry.getValue()) {

@@ -422,4 +422,58 @@ class ProjectIndexerIntegrationTest {
             .filter(n -> n.filePath().equals("app/util.py")).findFirst().orElseThrow();
         assertThat(utilModuleAfter.id()).isEqualTo(utilModuleId);
     }
+
+    @Test
+    void referencesTableEdgeTracksSqlTableDropAndRecreate() throws Exception {
+        var proj = tempDir.resolve("ref-table-proj");
+        var migrations = proj.resolve("db/migration");
+        Files.createDirectories(migrations);
+        Files.writeString(migrations.resolve("V1__init.sql"), """
+            CREATE TABLE supplier (id INT PRIMARY KEY);
+            """);
+        var javaDir = proj.resolve("src/main/java/com/demo");
+        Files.createDirectories(javaDir);
+        Files.writeString(javaDir.resolve("Supplier.java"), """
+            package com.demo;
+            import jakarta.persistence.Entity;
+            import jakarta.persistence.Table;
+            @Entity
+            @Table(name = "supplier")
+            public class Supplier {}
+            """);
+
+        indexer.indexFull(proj);
+
+        assertThat(store.getAllEdges())
+            .filteredOn(e -> e.type() == com.codenavigator.graph.EdgeType.REFERENCES_TABLE)
+            .hasSize(1);
+
+        // Drop the table: the edge and the SQL_TABLE node both disappear.
+        Thread.sleep(100);
+        Files.writeString(migrations.resolve("V2__drop.sql"), """
+            DROP TABLE supplier;
+            """);
+
+        indexer.indexIncremental(proj);
+
+        assertThat(store.getAllEdges())
+            .filteredOn(e -> e.type() == com.codenavigator.graph.EdgeType.REFERENCES_TABLE)
+            .isEmpty();
+        assertThat(store.findNodesByType(NodeType.SQL_TABLE)).isEmpty();
+
+        // Recreate the table: the edge comes back, between the same class and table ids.
+        Thread.sleep(100);
+        Files.writeString(migrations.resolve("V3__recreate.sql"), """
+            CREATE TABLE supplier (id INT PRIMARY KEY);
+            """);
+
+        indexer.indexIncremental(proj);
+
+        var edges = store.getAllEdges().stream()
+            .filter(e -> e.type() == com.codenavigator.graph.EdgeType.REFERENCES_TABLE)
+            .toList();
+        assertThat(edges).hasSize(1);
+        assertThat(edges.getFirst().sourceId()).isEqualTo("com.demo.Supplier");
+        assertThat(edges.getFirst().targetId()).isEqualTo("sql:supplier");
+    }
 }
