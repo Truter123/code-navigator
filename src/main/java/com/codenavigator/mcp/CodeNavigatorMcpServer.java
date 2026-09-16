@@ -485,14 +485,14 @@ public class CodeNavigatorMcpServer {
     }
 
     String handleCgCallers(Map<String, Object> args) {
-        return handleCallGraph(args, "Callers", true);
+        return handleCallGraph(args, true);
     }
 
     String handleCgCallees(Map<String, Object> args) {
-        return handleCallGraph(args, "Callees", false);
+        return handleCallGraph(args, false);
     }
 
-    private String handleCallGraph(Map<String, Object> args, String label, boolean incoming) {
+    private String handleCallGraph(Map<String, Object> args, boolean incoming) {
         var scope = resolveScope(args);
         String symbol = (String) args.get("symbol");
         int depth = getIntArg(args, "depth", 5);
@@ -505,10 +505,18 @@ public class CodeNavigatorMcpServer {
             incoming ? scope.traversal().callers(nodeId, depth)
                      : scope.traversal().callees(nodeId, depth),
             args, start);
+        // "Callers"/"Callees" reads right for a method; a non-method node (SQL_TABLE, SHELL_SCRIPT,
+        // ...) has no callers, only things that connect to it — "Incoming to"/"Outgoing from" is
+        // the smallest heading change that still reads right there.
+        boolean methodLike = start != null && start.type() == NodeType.METHOD;
+        String heading = methodLike
+            ? (incoming ? "Callers of " : "Callees of ") + symbol
+            : (incoming ? "Incoming to " : "Outgoing from ") + symbol;
+        String noun = methodLike ? (incoming ? "callers" : "callees") : (incoming ? "incoming" : "outgoing");
         var sb = new StringBuilder();
-        sb.append("## ").append(label).append(" of ").append(symbol).append("\n\n");
+        sb.append("## ").append(heading).append("\n\n");
         sb.append(ambiguityNote(candidatesFor(scope.store(), symbol)));
-        sb.append(nodes.size()).append(" ").append(label.toLowerCase()).append(" found");
+        sb.append(nodes.size()).append(" ").append(noun).append(" found");
         if (nodes.size() > limit) sb.append(" (showing first ").append(limit).append(")");
         sb.append(":\n\n");
         nodes.stream().limit(limit).forEach(n -> sb.append(formatNodeLine(n)).append("\n"));
@@ -536,7 +544,8 @@ public class CodeNavigatorMcpServer {
         }
 
         if (includeCode && node.codeSnippet() != null && !node.codeSnippet().isEmpty()) {
-            sb.append("\n### Code\n```java\n").append(node.codeSnippet()).append("\n```\n");
+            sb.append("\n### Code\n```").append(fenceLanguage(node.filePath()))
+              .append("\n").append(node.codeSnippet()).append("\n```\n");
         }
 
         var outgoing = store.findEdgesFrom(nodeId);
@@ -1032,13 +1041,35 @@ public class CodeNavigatorMcpServer {
 
         return store.findNodesByName(wantedName).stream()
             .filter(n -> n.type() == NodeType.METHOD)
-            .filter(n -> matchesClass(MethodIds.declaringClass(n.id()), wantedClass))
+            .filter(n -> matchesOwner(store, n, wantedClass))
             .filter(n -> {
                 if (wantedParams == null) return true;
                 int o = n.id().indexOf('('), c = n.id().lastIndexOf(')');
                 return o >= 0 && c > o && n.id().substring(o + 1, c).equalsIgnoreCase(wantedParams);
             })
             .toList();
+    }
+
+    /**
+     * True when {@code wanted} names the owner of {@code method} — a Java class (simple or fqn),
+     * a PY_MODULE/PY_CLASS (simple or dotted-qualified), or a SHELL_SCRIPT. Resolved through the
+     * method's own {@code DECLARES_METHOD} edge rather than string-splitting the method id: the id
+     * carries a Java-shaped {@code declaringClass#name}, but a Python/shell owner id is a file
+     * path (e.g. {@code tools/build.py}), so splitting it never recovers the module name
+     * {@code build} that {@code build#build_or_update_graph} was written against.
+     */
+    private static boolean matchesOwner(GraphStore store, Node method, String wanted) {
+        if (wanted == null || wanted.isBlank()) return true;
+        String ownerId = store.findEdgesTo(method.id()).stream()
+            .filter(e -> e.type() == EdgeType.DECLARES_METHOD)
+            .map(Edge::sourceId)
+            .findFirst()
+            .orElseGet(() -> MethodIds.declaringClass(method.id()));
+        if (matchesClass(ownerId, wanted)) return true;
+        return store.findNodeById(ownerId)
+            .filter(owner -> owner.name().equalsIgnoreCase(wanted)
+                || (owner.qualifiedName() != null && owner.qualifiedName().equalsIgnoreCase(wanted)))
+            .isPresent();
     }
 
     private static boolean matchesClass(String declaring, String wanted) {
@@ -1082,6 +1113,27 @@ public class CodeNavigatorMcpServer {
             sb.append("\n");
         }
         return sb.toString();
+    }
+
+    /**
+     * The Markdown code-fence language for a source file, picked from its extension. A snippet
+     * from a shell script or a SQL migration rendered as ```java``` misled a reader into parsing
+     * it with the wrong grammar; extension is a cheap, reliable signal since every indexed
+     * language owns a distinct one.
+     */
+    static String fenceLanguage(String filePath) {
+        if (filePath == null) return "java";
+        int dot = filePath.lastIndexOf('.');
+        String ext = dot >= 0 ? filePath.substring(dot + 1).toLowerCase(Locale.ROOT) : "";
+        return switch (ext) {
+            case "sh" -> "bash";
+            case "sql" -> "sql";
+            case "py" -> "python";
+            case "ts" -> "typescript";
+            case "groovy" -> "groovy";
+            case "dart" -> "dart";
+            default -> "java";
+        };
     }
 
     private static String formatNodeLine(Node node) {

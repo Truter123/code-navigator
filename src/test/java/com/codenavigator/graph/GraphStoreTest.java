@@ -402,6 +402,20 @@ class GraphStoreTest {
     }
 
     @Test
+    void findDeadNodeCandidates_excludesShellScriptsAndFlagsUnreferencedTableAsLow() {
+        store.saveNode(new Node("deploy.sh", NodeType.SHELL_SCRIPT, "deploy", "deploy.sh", "deploy.sh", 1, "", 0));
+        store.saveNode(new Node("clean.sh", NodeType.SHELL_SCRIPT, "clean", "clean.sh", "clean.sh", 1, "", 0));
+        store.saveNode(new Node("sql:orphan_table", NodeType.SQL_TABLE, "orphan_table", "orphan_table", "V1__init.sql", 1, "", 0));
+
+        var candidates = store.findDeadNodeCandidates(null);
+        assertThat(candidates).extracting(c -> c.node().type())
+            .doesNotContain(NodeType.SHELL_SCRIPT);
+        var table = candidates.stream().filter(c -> c.node().name().equals("orphan_table")).findFirst();
+        assertThat(table).isPresent();
+        assertThat(table.get().confidence()).isEqualTo(DeadCodeConfidence.LOW);
+    }
+
+    @Test
     void findDeadNodeCandidates_testSourceIsNeverDead() {
         store.saveNode(new Node("n1", NodeType.SERVICE, "FooTest", "com.FooTest", "src/test/java/com/FooTest.java", 1, "", 0));
         store.saveNode(new Node("n2", NodeType.FE_COMPONENT, "BarSpec", "com.BarSpec", "src/app/bar.spec.ts", 1, "", 0));

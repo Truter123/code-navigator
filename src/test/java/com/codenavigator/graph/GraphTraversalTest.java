@@ -328,4 +328,49 @@ class GraphTraversalTest {
         assertThat(nodeIds(traversal.callees("A", 3))).doesNotContain("A");
         assertThat(nodeIds(traversal.impact("A", 3))).doesNotContain("A");
     }
+
+    // ---- Extra-language seam edges (Python, shell, SQL) ----
+
+    @Test
+    void callersFollowsReferencesTableEdges() {
+        store.saveNode(new Node("sql:supplier", NodeType.SQL_TABLE, "supplier", "supplier", "V1.sql", 1, "", 0));
+        store.saveNode(new Node("SupplierEntity", NodeType.ENTITY, "SupplierEntity", "SupplierEntity", "SupplierEntity.java", 1, "", 0));
+        store.saveNode(new Node("SupplierRepository", NodeType.REPOSITORY, "SupplierRepository", "SupplierRepository", "SupplierRepository.java", 1, "", 0));
+        store.saveEdge(new Edge("r1", EdgeType.REFERENCES_TABLE, "SupplierEntity", "sql:supplier"));
+        store.saveEdge(new Edge("r2", EdgeType.REFERENCES_TABLE, "SupplierRepository", "sql:supplier"));
+
+        Set<String> callers = nodeIds(traversal.callers("sql:supplier", 1));
+        assertThat(callers).containsExactlyInAnyOrder("SupplierEntity", "SupplierRepository");
+    }
+
+    @Test
+    void callersFollowsSourcesEdgeForShellScripts() {
+        store.saveNode(new Node("lib.sh", NodeType.SHELL_SCRIPT, "lib", "lib.sh", "lib.sh", 1, "", 0));
+        store.saveNode(new Node("deploy.sh", NodeType.SHELL_SCRIPT, "deploy", "deploy.sh", "deploy.sh", 1, "", 0));
+        store.saveEdge(new Edge("s1", EdgeType.SOURCES, "deploy.sh", "lib.sh"));
+
+        Set<String> callers = nodeIds(traversal.callers("lib.sh", 1));
+        assertThat(callers).contains("deploy.sh");
+    }
+
+    @Test
+    void callersDoesNotEmitDeclaringOwnerAsACaller() {
+        // A PY_MODULE "build" declares the function it owns via DECLARES_METHOD, the same free
+        // hop Java classes use. The module is containment, not a caller: cg_related direction=in
+        // on the function must not list its own declaring module as if it called itself.
+        store.saveNode(new Node("tools/build.py", NodeType.PY_MODULE, "build", "build", "tools/build.py", 1, "", 0));
+        store.saveNode(new Node("tools/build.py#build_or_update_graph()", NodeType.METHOD,
+            "build_or_update_graph", "tools/build.py#build_or_update_graph()", "tools/build.py", 10, "", 0));
+        store.saveEdge(new Edge("dm1", EdgeType.DECLARES_METHOD, "tools/build.py",
+            "tools/build.py#build_or_update_graph()"));
+        store.saveNode(new Node("caller.py", NodeType.PY_MODULE, "caller", "caller", "caller.py", 1, "", 0));
+        store.saveNode(new Node("caller.py#run()", NodeType.METHOD, "run", "caller.py#run()", "caller.py", 5, "", 0));
+        store.saveEdge(new Edge("dm2", EdgeType.DECLARES_METHOD, "caller.py", "caller.py#run()"));
+        store.saveEdge(new Edge("c1", EdgeType.CALLS, "caller.py#run()",
+            "tools/build.py#build_or_update_graph()"));
+
+        Set<String> callers = nodeIds(traversal.callers("tools/build.py#build_or_update_graph()", 2));
+        assertThat(callers).contains("caller.py#run()");
+        assertThat(callers).doesNotContain("tools/build.py");
+    }
 }

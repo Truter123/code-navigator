@@ -7,7 +7,12 @@ public class GraphTraversal {
     private static final Set<EdgeType> CALL_EDGE_TYPES = Set.of(
         EdgeType.CALLS_METHOD, EdgeType.INJECTS, EdgeType.CALLS_API, EdgeType.USES_SERVICE,
         EdgeType.DISPATCHES_COMMAND, EdgeType.DISPATCHES_QUERY, EdgeType.USES_LIBRARY,
-        EdgeType.CALLS, EdgeType.DECLARES_METHOD, EdgeType.OVERRIDES
+        EdgeType.CALLS, EdgeType.DECLARES_METHOD, EdgeType.OVERRIDES,
+        // Extra-language seam (Python, shell, SQL): a non-method node's incoming/outgoing
+        // connections still answer "who/what connects to X" — a SQL_TABLE's REFERENCES_TABLE
+        // callers, a SHELL_SCRIPT's SOURCES/RUNS neighbours, a PY_MODULE's IMPORTS.
+        EdgeType.REFERENCES_TABLE, EdgeType.DERIVES_FROM, EdgeType.REFERENCES_FK,
+        EdgeType.SOURCES, EdgeType.RUNS, EdgeType.IMPORTS
     );
 
     /**
@@ -152,7 +157,14 @@ public class GraphTraversal {
                     }
                 }
 
-                if (!neighborId.equals(startId) && emitted.add(neighborId)) {
+                // An owner reached only via the free method->owner hop (class, PY_MODULE,
+                // SHELL_SCRIPT) is containment, not a call: on an INCOMING (callers) query it
+                // must not be emitted as if it called the method — nobody called the method by
+                // declaring it. Emitted as context on OUTGOING/BOTH, where naming the owner of a
+                // callee is the point (see contextOnly above).
+                boolean ownerHop = free && !outgoing && !neighborId.equals(startId);
+                boolean suppressAsCaller = ownerHop && direction == Direction.INCOMING;
+                if (!neighborId.equals(startId) && emitted.add(neighborId) && !suppressAsCaller) {
                     store.findNodeById(neighborId).ifPresent(result::add);
                 }
             }

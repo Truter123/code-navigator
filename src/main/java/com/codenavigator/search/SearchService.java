@@ -28,7 +28,7 @@ public class SearchService {
      * FTS5 search (with LIKE fallback).
      */
     public List<Node> search(String query) {
-        String ftsQuery = query.endsWith("*") ? query : query + "*";
+        String ftsQuery = buildFtsQuery(query);
         var ftsOrdered = new LinkedHashMap<String, Node>();
         for (var node : store.searchFts(ftsQuery)) {
             ftsOrdered.put(node.id(), node);
@@ -36,7 +36,33 @@ public class SearchService {
         for (var node : store.searchLike(query)) {
             ftsOrdered.putIfAbsent(node.id(), node);
         }
-        return new ArrayList<>(ftsOrdered.values());
+        var results = new ArrayList<>(ftsOrdered.values());
+        // An exact case-insensitive name match first: FTS5 rank alone buried a table node named
+        // exactly "supplier" behind 140 partial matches (SupplierEntity, SupplierRepository, ...).
+        // Stable sort keeps everything else in its FTS/LIKE order.
+        results.sort(Comparator.comparing(n -> !n.name().equalsIgnoreCase(query)));
+        return results;
+    }
+
+    /**
+     * Builds the FTS5 MATCH expression for a raw user query. FTS5 treats {@code - " * ( ) : ^ +}
+     * and the bare words {@code NOT AND OR} as operators, so a name like {@code clean-restart}
+     * (routine for shell scripts and Python modules) threw a syntax error when appended with a
+     * bare {@code *}. Quoting every token neutralises the operators; a quoted token followed by
+     * {@code *} is still a valid FTS5 prefix query, so {@code Supplier} still matches
+     * {@code SupplierEntity}.
+     */
+    static String buildFtsQuery(String query) {
+        String q = query.trim();
+        if (q.endsWith("*")) q = q.substring(0, q.length() - 1).trim();
+        String[] tokens = q.isEmpty() ? new String[0] : q.split("\\s+");
+        var sb = new StringBuilder();
+        for (int i = 0; i < tokens.length; i++) {
+            if (i > 0) sb.append(' ');
+            sb.append('"').append(tokens[i].replace("\"", "\"\"")).append('"');
+        }
+        sb.append('*');
+        return sb.toString();
     }
 
     /**

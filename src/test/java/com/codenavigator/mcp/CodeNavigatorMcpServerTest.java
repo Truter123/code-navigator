@@ -120,6 +120,40 @@ class CodeNavigatorMcpServerTest {
     }
 
     @Test
+    void cgCallersOnANonMethodNodeReadsAsIncomingNotCallers() {
+        store.saveNode(new Node("sql:supplier", NodeType.SQL_TABLE, "supplier", "supplier", "V1.sql", 1, "", 0));
+        store.saveNode(new Node("SupplierEntity", NodeType.ENTITY, "SupplierEntity", "SupplierEntity",
+            "SupplierEntity.java", 1, "", 0));
+        store.saveEdge(new Edge("r1", EdgeType.REFERENCES_TABLE, "SupplierEntity", "sql:supplier"));
+
+        var result = mcpServer.handleCgCallers(Map.of("symbol", "supplier"));
+        assertThat(result).contains("Incoming to supplier").contains("SupplierEntity");
+        assertThat(result).doesNotContain("0 callers found");
+    }
+
+    @Test
+    void cgNodeFenceLanguagePicksExtension() {
+        assertThat(CodeNavigatorMcpServer.fenceLanguage("deploy/clean-restart.sh")).isEqualTo("bash");
+        assertThat(CodeNavigatorMcpServer.fenceLanguage("db/V1__init.sql")).isEqualTo("sql");
+        assertThat(CodeNavigatorMcpServer.fenceLanguage("tools/build.py")).isEqualTo("python");
+        assertThat(CodeNavigatorMcpServer.fenceLanguage("src/app/order.ts")).isEqualTo("typescript");
+        assertThat(CodeNavigatorMcpServer.fenceLanguage("scripts/build.groovy")).isEqualTo("groovy");
+        assertThat(CodeNavigatorMcpServer.fenceLanguage("lib/model.dart")).isEqualTo("dart");
+        assertThat(CodeNavigatorMcpServer.fenceLanguage("com/example/Order.java")).isEqualTo("java");
+        assertThat(CodeNavigatorMcpServer.fenceLanguage(null)).isEqualTo("java");
+    }
+
+    @Test
+    void cgNodeRendersShellScriptSnippetInBashFence() {
+        store.saveNode(new Node("deploy.sh", NodeType.SHELL_SCRIPT, "deploy", "deploy.sh",
+            "deploy.sh", 1, "#!/usr/bin/env bash\necho hi", 0));
+
+        var result = mcpServer.handleCgNode(Map.of("symbol", "deploy"));
+        assertThat(result).contains("```bash");
+        assertThat(result).doesNotContain("```java");
+    }
+
+    @Test
     void cgNode() {
         var result = mcpServer.handleCgNode(Map.of("symbol", "Order"));
         assertThat(result).contains("AGGREGATE");
@@ -416,6 +450,44 @@ class CodeNavigatorMcpServerTest {
         var result = mcpServer.handleCgMethod(Map.of("symbol", "Nope#missing"));
 
         assertThat(result).contains("No method matching").contains("Class#method");
+    }
+
+    @Test
+    void cgMethodResolvesPyModuleOwnerByBareOrQualifiedName() {
+        store.saveNode(new Node("tools/build.py", NodeType.PY_MODULE, "build", "tools.build",
+            "tools/build.py", 1, "", 0));
+        store.saveNode(new Node("tools/build.py#build_or_update_graph()", NodeType.METHOD,
+            "build_or_update_graph", "tools/build.py#build_or_update_graph()", "tools/build.py",
+            468, "def build_or_update_graph():", 0));
+        store.saveEdge(new Edge("dm", EdgeType.DECLARES_METHOD, "tools/build.py",
+            "tools/build.py#build_or_update_graph()"));
+
+        var bare = mcpServer.handleCgMethod(Map.of("symbol", "build#build_or_update_graph"));
+        assertThat(bare).contains("tools/build.py#build_or_update_graph()").contains("468");
+
+        var qualified = mcpServer.handleCgMethod(Map.of("symbol", "tools.build#build_or_update_graph"));
+        assertThat(qualified).contains("tools/build.py#build_or_update_graph()");
+    }
+
+    @Test
+    void cgMethodResolvesShellScriptOwner() {
+        store.saveNode(new Node("clean-restart.sh", NodeType.SHELL_SCRIPT, "clean-restart",
+            "clean-restart.sh", "clean-restart.sh", 1, "", 0));
+        store.saveNode(new Node("clean-restart.sh#confirm()", NodeType.METHOD, "confirm",
+            "clean-restart.sh#confirm()", "clean-restart.sh", 10, "confirm() {", 0));
+        store.saveEdge(new Edge("dm", EdgeType.DECLARES_METHOD, "clean-restart.sh",
+            "clean-restart.sh#confirm()"));
+
+        var result = mcpServer.handleCgMethod(Map.of("symbol", "clean-restart#confirm"));
+        assertThat(result).contains("clean-restart.sh#confirm()");
+    }
+
+    @Test
+    void cgMethodStillResolvesJavaClassOwner() {
+        addMethodGraph();
+
+        var result = mcpServer.handleCgMethod(Map.of("symbol", "Order#complete"));
+        assertThat(result).contains("com.Order#complete(UUID)");
     }
 
     @Test

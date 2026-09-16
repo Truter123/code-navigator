@@ -5,6 +5,7 @@ import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
 class SearchServiceTest {
 
@@ -59,5 +60,38 @@ class SearchServiceTest {
     void extractKeywordsFiltersShortWords() {
         var keywords = searchService.extractKeywords("do it on a go");
         assertThat(keywords).isEmpty();
+    }
+
+    @Test
+    void searchFindsHyphenatedShellScriptName() {
+        store.saveNode(new Node("clean-restart.sh", NodeType.SHELL_SCRIPT, "clean-restart",
+            "clean-restart.sh", "clean-restart.sh", 1, "", 0));
+
+        var results = searchService.search("clean-restart");
+        assertThat(results).extracting(Node::name).contains("clean-restart");
+    }
+
+    @Test
+    void searchWithParenthesisDoesNotThrow() {
+        assertThatCode(() -> searchService.search("build(x)")).doesNotThrowAnyException();
+    }
+
+    @Test
+    void searchPrefixMatchStillWorks() {
+        var results = searchService.search("Purchase");
+        assertThat(results).extracting(Node::name).contains("PurchaseOrder", "CreatePurchaseOrderCommand");
+    }
+
+    @Test
+    void searchRanksExactNameMatchFirst() {
+        store.saveNode(new Node("com.supplier.Supplier", NodeType.CLASS,
+            "Supplier", "com.supplier.Supplier", "s.java", 1, "public class Supplier", 0));
+        store.saveNode(new Node("com.supplier.SupplierEntity", NodeType.ENTITY,
+            "SupplierEntity", "com.supplier.SupplierEntity", "e.java", 1, "public class SupplierEntity", 0));
+        store.saveNode(new Node("com.supplier.SupplierRepository", NodeType.REPOSITORY,
+            "SupplierRepository", "com.supplier.SupplierRepository", "r.java", 1, "public interface SupplierRepository", 0));
+
+        var results = searchService.search("supplier");
+        assertThat(results.get(0).name()).isEqualTo("Supplier");
     }
 }

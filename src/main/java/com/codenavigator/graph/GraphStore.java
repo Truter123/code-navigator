@@ -350,8 +350,29 @@ public class GraphStore implements AutoCloseable {
      */
     private static final Set<NodeType> FRAMEWORK_ENTRY_POINT_TYPES = Set.of(
         NodeType.CONTROLLER, NodeType.EVENT_LISTENER, NodeType.PROJECTION_HANDLER,
-        NodeType.EVENT_APPLIER, NodeType.COMMAND_HANDLER, NodeType.QUERY_HANDLER,
-        NodeType.CONFIGURATION
+        NodeType.EVENT_APPLIER, NodeType.COMMAND_HANDLER, NodeType.QUERY_HANDLER
+    );
+
+    /**
+     * Node types that are entry points by construction — run by a human, cron, CI or Docker
+     * (scripts), wired by a build/DI tool (configuration), or a placeholder for an external
+     * binary the indexer never claims to see calls into (a {@code RUNS} target). An empty
+     * incoming-edge set carries no signal at all here, unlike {@link #FRAMEWORK_ENTRY_POINT_TYPES}
+     * where it is still worth a LOW-confidence mention: these are dropped from the candidate set
+     * entirely rather than listed.
+     */
+    private static final Set<NodeType> EXCLUDED_ROOT_TYPES = Set.of(
+        NodeType.CONFIGURATION, NodeType.SHELL_SCRIPT, NodeType.SHELL_COMMAND, NodeType.PY_MODULE
+    );
+
+    /**
+     * SQL nodes with no incoming {@code REFERENCES_TABLE}/{@code DERIVES_FROM}/{@code
+     * REFERENCES_FK} edge are a useful LOW-confidence signal ("no code references this table"),
+     * distinct from the ordinary HIGH/MEDIUM tiering below — nothing in {@link
+     * #HIGH_CONFIDENCE_TYPES} applies to a table, and it is not a framework entry point either.
+     */
+    private static final Set<NodeType> SQL_REFERENCE_TYPES = Set.of(
+        NodeType.SQL_TABLE, NodeType.SQL_VIEW, NodeType.SQL_ROUTINE
     );
 
     /**
@@ -381,6 +402,7 @@ public class GraphStore implements AutoCloseable {
         List<DeadCodeCandidate> result = new ArrayList<>();
 
         for (Node node : findNoIncomingEdgeNodes(typeFilter)) {
+            if (EXCLUDED_ROOT_TYPES.contains(node.type())) continue;
             if (isTestSource(node.filePath())) {
                 result.add(new DeadCodeCandidate(node, DeadCodeConfidence.TEST_SOURCE,
                     "Test source — JUnit/Vitest invoke it reflectively, so it has no incoming " +
@@ -398,6 +420,13 @@ public class GraphStore implements AutoCloseable {
                     "auto-registration, so it will never show incoming graph edges even when live."));
                 continue;
             }
+            if (SQL_REFERENCE_TYPES.contains(node.type())) {
+                result.add(new DeadCodeCandidate(node, DeadCodeConfidence.LOW,
+                    "No code references this table — nothing indexed emits a REFERENCES_TABLE/" +
+                    "DERIVES_FROM/REFERENCES_FK edge to it. Worth a look, but a table can be used " +
+                    "by manual SQL, an external tool, or code outside this project."));
+                continue;
+            }
             DeadCodeConfidence confidence = HIGH_CONFIDENCE_TYPES.contains(node.type())
                 ? DeadCodeConfidence.HIGH : DeadCodeConfidence.MEDIUM;
             String reason = confidence == DeadCodeConfidence.HIGH
@@ -411,6 +440,7 @@ public class GraphStore implements AutoCloseable {
         }
 
         for (Node node : findUsedOnlyByTestsNodes(typeFilter)) {
+            if (EXCLUDED_ROOT_TYPES.contains(node.type())) continue;
             result.add(new DeadCodeCandidate(node, DeadCodeConfidence.USED_ONLY_BY_TESTS,
                 "Has incoming edges, but every one of them originates in test code — unused by " +
                 "production code as far as the graph shows. May be intentional test scaffolding, " +
