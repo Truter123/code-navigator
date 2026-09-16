@@ -14,5 +14,7 @@ public enum EdgeType {
     // Frontend
     CALLS_API, USES_SERVICE,
     // External
-    USES_LIBRARY
+    USES_LIBRARY,
+    // Extra-language seam (Python, shell, SQL — plan "code-navigator indexes Python, SQL and shell")
+    IMPORTS, REFERENCES_TABLE, DERIVES_FROM, REFERENCES_FK, SOURCES, RUNS
 }

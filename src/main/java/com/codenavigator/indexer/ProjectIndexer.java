@@ -12,7 +12,9 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.function.Predicate;
 
@@ -27,6 +29,7 @@ public class ProjectIndexer {
     private final TypeScriptMethodExtractor tsMethodExtractor;
     private final DartMethodExtractor dartMethodExtractor;
     private final DependencyParser dependencyParser;
+    private final List<LanguageIndexer> extraIndexers = List.of(new ShellIndexer());
 
     public ProjectIndexer(GraphStore store) {
         this.store = store;
@@ -73,6 +76,7 @@ public class ProjectIndexer {
         List<Path> tsFiles = findTsFiles(projectPath);
         List<Path> groovyFiles = findGroovyFiles(projectPath);
         List<Path> dartFiles = findDartFiles(projectPath);
+        Map<LanguageIndexer, List<Path>> extraFilesByIndexer = collectExtraFiles(projectPath);
 
         // 3. Phase 1: Extract nodes from Java files
         store.batch(() -> {
@@ -122,11 +126,22 @@ public class ProjectIndexer {
             }
         });
 
+        // 4d. Phase 1f: Extract nodes from extra-language files (shell today; SQL/Python later)
+        store.batch(() -> {
+            for (var entry : extraFilesByIndexer.entrySet()) {
+                for (Path file : entry.getValue()) {
+                    for (Node node : entry.getKey().indexFile(file, projectPath)) {
+                        store.saveNode(node);
+                    }
+                }
+            }
+        });
+
         // 5. Phase 2: Methods, then edges (same rebuild indexIncremental re-runs on any change)
-        rebuildEdgesAndMethods(javaFiles, tsFiles, dartFiles, projectPath, edgeExtractor);
+        rebuildEdgesAndMethods(javaFiles, tsFiles, dartFiles, extraFilesByIndexer, projectPath, edgeExtractor);
 
         // 6. Track indexed files
-        trackFiles(projectPath, javaFiles, tsFiles, groovyFiles, dartFiles);
+        trackFiles(projectPath, javaFiles, tsFiles, groovyFiles, dartFiles, extraFilesByIndexer);
 
         // 7. Mine git co-change coupling (silently skipped if not a git repo). upsertCoChange
         // increments an existing count, so without clearing first a second indexFull doubles
@@ -158,22 +173,24 @@ public class ProjectIndexer {
         List<Path> tsFiles = findTsFiles(projectPath);
         List<Path> groovyFiles = findGroovyFiles(projectPath);
         List<Path> dartFiles = findDartFiles(projectPath);
+        Map<LanguageIndexer, List<Path>> extraFilesByIndexer = collectExtraFiles(projectPath);
 
         // 3. Re-index changed files
         boolean anyChanged = reindexChangedJavaFiles(javaFiles, projectPath, nodeExtractor);
         anyChanged |= reindexChangedTsFiles(tsFiles);
         anyChanged |= reindexChangedGroovyFiles(groovyFiles);
         anyChanged |= reindexChangedDartFiles(dartFiles);
+        anyChanged |= reindexChangedExtraFiles(extraFilesByIndexer, projectPath);
         anyChanged |= pruneDeletedFiles(projectPath);
 
         // 4. Full methods + edge re-extraction if anything changed, mirroring indexFull exactly
         // so a sync never leaves the graph in a state a full index couldn't also produce.
         if (anyChanged) {
-            rebuildEdgesAndMethods(javaFiles, tsFiles, dartFiles, projectPath, edgeExtractor);
+            rebuildEdgesAndMethods(javaFiles, tsFiles, dartFiles, extraFilesByIndexer, projectPath, edgeExtractor);
         }
 
         // 5. Update tracked files
-        trackFiles(projectPath, javaFiles, tsFiles, groovyFiles, dartFiles);
+        trackFiles(projectPath, javaFiles, tsFiles, groovyFiles, dartFiles, extraFilesByIndexer);
     }
 
     /**
@@ -185,6 +202,7 @@ public class ProjectIndexer {
      * full index would produce.
      */
     private void rebuildEdgesAndMethods(List<Path> javaFiles, List<Path> tsFiles, List<Path> dartFiles,
+                                        Map<LanguageIndexer, List<Path>> extraFilesByIndexer,
                                         Path projectPath, EdgeExtractor edgeExtractor) {
         store.deleteAllEdges();
         store.deleteAllMethods();
@@ -226,6 +244,7 @@ public class ProjectIndexer {
         extractFeEdges();
         extractTsCallEdges(tsMethods);
         extractDartEdges(dartFiles, dartMethods);
+        extractExtraLanguageEdges(extraFilesByIndexer, projectPath);
     }
 
     // ---- Shared extraction helpers ----
@@ -347,6 +366,45 @@ public class ProjectIndexer {
                 + "bound (%.0f%%), %d into framework/SDK types.%n",
             dartMethods.size(), resolved, judged,
             judged <= 0 ? 100.0 : (100.0 * resolved / judged), external);
+    }
+
+    /**
+     * Methods and edges for every extra-language file (shell today), once every extra-language
+     * top-level node exists. Mirrors {@link #extractAndSaveEdges}: methods first so their nodes
+     * exist, then {@code fileNodes} is re-read from the store so edge extraction sees both.
+     */
+    private void extractExtraLanguageEdges(Map<LanguageIndexer, List<Path>> extraFilesByIndexer, Path projectPath) {
+        var known = KnownNames.empty();
+        for (var entry : extraFilesByIndexer.entrySet()) {
+            LanguageIndexer indexer = entry.getKey();
+            for (Path file : entry.getValue()) {
+                String filePath = projectPath.relativize(file).toString();
+                var methodNodes = indexer.extractMethods(file, store.findNodesByFilePath(filePath));
+                store.batch(() -> {
+                    for (Node node : methodNodes) store.saveNode(node);
+                });
+
+                var edges = indexer.extractEdges(file, store.findNodesByFilePath(filePath), known);
+                store.batch(() -> {
+                    for (Edge edge : edges) {
+                        mintShellCommandNodeIfNeeded(edge);
+                        store.saveEdge(edge);
+                    }
+                });
+            }
+        }
+    }
+
+    /**
+     * A RUNS edge's target is a {@link NodeType#SHELL_COMMAND}, created lazily and shared across
+     * scripts the first time any script is seen running it — the same pattern {@code
+     * EdgeExtractor} uses to mint a {@code LIBRARY} node for {@code USES_LIBRARY}.
+     */
+    private void mintShellCommandNodeIfNeeded(Edge edge) {
+        if (edge.type() != EdgeType.RUNS) return;
+        if (store.findNodeById(edge.targetId()).isPresent()) return;
+        store.saveNode(new Node(edge.targetId(), NodeType.SHELL_COMMAND, edge.targetId(),
+            edge.targetId(), "", 0, "", 0L));
     }
 
     /**
@@ -500,6 +558,33 @@ public class ProjectIndexer {
     }
 
     /**
+     * Re-index changed files for every extra-language indexer: delete this file's nodes, re-run
+     * {@code indexFile}, re-save. Methods and edges are not extracted here — like Java/TS/Dart,
+     * {@link #rebuildEdgesAndMethods} re-derives all of them from scratch for every extra-language
+     * file whenever anything changed, mirroring {@link #reindexChangedDartFiles}.
+     */
+    private boolean reindexChangedExtraFiles(Map<LanguageIndexer, List<Path>> extraFilesByIndexer, Path projectPath) {
+        boolean anyChanged = false;
+        for (var entry : extraFilesByIndexer.entrySet()) {
+            LanguageIndexer indexer = entry.getKey();
+            for (Path file : entry.getValue()) {
+                var filePath = projectPath.relativize(file).toString();
+                try {
+                    if (!isFileChanged(file, filePath)) continue;
+                    anyChanged = true;
+                    store.deleteNodesByFilePath(filePath);
+                    for (Node node : indexer.indexFile(file, projectPath)) {
+                        store.saveNode(node);
+                    }
+                } catch (Exception e) {
+                    // Skip
+                }
+            }
+        }
+        return anyChanged;
+    }
+
+    /**
      * Drop nodes and tracking rows for files that were indexed earlier but no longer exist on disk.
      * Tracked paths are relative for Java files and absolute for TS/Groovy files (see trackFile),
      * and older indexes stored "./"-prefixed relative paths; resolve non-absolute ones against
@@ -620,6 +705,19 @@ public class ProjectIndexer {
         });
     }
 
+    /** Every {@link LanguageIndexer}'s files for this run, discovered once and reused across phases. */
+    private Map<LanguageIndexer, List<Path>> collectExtraFiles(Path projectPath) {
+        var byIndexer = new LinkedHashMap<LanguageIndexer, List<Path>>();
+        for (LanguageIndexer indexer : extraIndexers) {
+            byIndexer.put(indexer, findExtraFiles(projectPath, indexer));
+        }
+        return byIndexer;
+    }
+
+    private List<Path> findExtraFiles(Path projectPath, LanguageIndexer indexer) {
+        return findFiles(projectPath, indexer::matches);
+    }
+
     private List<Path> findFiles(Path projectPath, Predicate<Path> filter) {
         var files = new ArrayList<Path>();
         try {
@@ -647,7 +745,8 @@ public class ProjectIndexer {
     // ---- File tracking ----
 
     private void trackFiles(Path projectPath, List<Path> javaFiles, List<Path> tsFiles,
-                            List<Path> groovyFiles, List<Path> dartFiles) {
+                            List<Path> groovyFiles, List<Path> dartFiles,
+                            Map<LanguageIndexer, List<Path>> extraFilesByIndexer) {
         for (Path file : javaFiles) {
             trackFile(projectPath, file);
         }
@@ -660,11 +759,16 @@ public class ProjectIndexer {
         for (Path file : dartFiles) {
             trackFile(projectPath, file);
         }
+        for (List<Path> files : extraFilesByIndexer.values()) {
+            for (Path file : files) {
+                trackFile(projectPath, file);
+            }
+        }
     }
 
     private void trackFile(Path projectPath, Path file) {
         try {
-            String filePath = file.toString().endsWith(".java")
+            String filePath = file.toString().endsWith(".java") || file.toString().endsWith(".sh")
                     ? projectPath.relativize(file).toString()
                     : file.toString();
             long lastModified = Files.getLastModifiedTime(file).toMillis();

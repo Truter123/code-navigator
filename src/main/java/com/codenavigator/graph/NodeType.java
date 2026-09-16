@@ -18,6 +18,10 @@ public enum NodeType {
     // Frontend (extended) + scripts
     FE_CLASS, FE_ENUM, FE_PIPE, FE_GUARD, FE_INTERCEPTOR, FE_VALIDATOR, FE_CONSTANT,
     GROOVY_SCRIPT,
+    // Extra-language seam (Python, shell, SQL — plan "code-navigator indexes Python, SQL and shell")
+    PY_MODULE, PY_CLASS,
+    SHELL_SCRIPT, SHELL_COMMAND,
+    SQL_TABLE, SQL_VIEW, SQL_ROUTINE,
     // External
     LIBRARY
 }

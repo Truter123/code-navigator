@@ -261,4 +261,64 @@ class ProjectIndexerIntegrationTest {
         assertThat(libraryNodes).isNotEmpty();
         assertThat(libraryNodes).allMatch(n -> n.id().startsWith("org.springframework"));
     }
+
+    @Test
+    void indexesShellScriptsWithFunctionsAndSourcesEdge() throws Exception {
+        var proj = tempDir.resolve("shell-proj");
+        Files.createDirectories(proj);
+        Files.writeString(proj.resolve("lib.sh"), """
+            #!/bin/bash
+            helper() {
+              echo helping
+            }
+            """);
+        var deployFile = proj.resolve("deploy.sh");
+        Files.writeString(deployFile, """
+            #!/bin/bash
+            source ./lib.sh
+
+            build() {
+              echo building
+            }
+            """);
+
+        indexer.indexFull(proj);
+
+        assertThat(store.findNodesByType(NodeType.SHELL_SCRIPT)).hasSize(2);
+        var methodNodes = store.getAllNodes().stream()
+            .filter(n -> n.type() == com.codenavigator.graph.NodeType.METHOD
+                && (n.filePath().equals("lib.sh") || n.filePath().equals("deploy.sh")))
+            .toList();
+        assertThat(methodNodes).hasSize(2);
+
+        var edges = store.getAllEdges();
+        assertThat(edges).filteredOn(e -> e.type() == com.codenavigator.graph.EdgeType.SOURCES).hasSize(1);
+        long declaresMethodForShell = edges.stream()
+            .filter(e -> e.type() == com.codenavigator.graph.EdgeType.DECLARES_METHOD)
+            .filter(e -> methodNodes.stream().anyMatch(m -> m.id().equals(e.targetId())))
+            .count();
+        assertThat(declaresMethodForShell).isEqualTo(2);
+
+        // Modify deploy.sh to add a RUNS-worthy command and re-sync incrementally.
+        Thread.sleep(100);
+        Files.writeString(deployFile, """
+            #!/bin/bash
+            source ./lib.sh
+
+            build() {
+              echo building
+            }
+
+            git pull
+            """);
+        deployFile.toFile().setLastModified(System.currentTimeMillis() + 10000);
+
+        int nodeCountBeforeIncremental = store.getAllNodes().size();
+        indexer.indexIncremental(proj);
+
+        assertThat(store.getAllEdges()).anyMatch(e -> e.type() == com.codenavigator.graph.EdgeType.RUNS
+            && e.targetId().equals("git"));
+        // One new SHELL_COMMAND node for "git"; everything else unchanged.
+        assertThat(store.getAllNodes().size()).isEqualTo(nodeCountBeforeIncremental + 1);
+    }
 }
