@@ -366,4 +366,60 @@ class ProjectIndexerIntegrationTest {
         assertThat(store.findNodeById(barNode.id())).isPresent();
         assertThat(store.findNodeById(renamedFooNode.id())).isPresent();
     }
+
+    @Test
+    void indexesPythonPackageWithImportAndCallEdgeThenIncrementalClassAdd() throws Exception {
+        var proj = tempDir.resolve("py-proj");
+        var app = proj.resolve("app");
+        Files.createDirectories(app);
+        Files.writeString(app.resolve("__init__.py"), "");
+        Files.writeString(app.resolve("util.py"), """
+            def helper():
+                return 1
+            """);
+        var mainFile = app.resolve("main.py");
+        Files.writeString(mainFile, """
+            from .util import helper
+
+            def run():
+                return helper()
+            """);
+
+        indexer.indexFull(proj);
+
+        assertThat(store.findNodesByType(NodeType.PY_MODULE)).hasSize(3);
+        assertThat(store.findNodesByType(NodeType.METHOD)).hasSize(2);
+        assertThat(store.getAllEdges())
+            .filteredOn(e -> e.type() == com.codenavigator.graph.EdgeType.IMPORTS).hasSize(1);
+        assertThat(store.getAllEdges())
+            .filteredOn(e -> e.type() == com.codenavigator.graph.EdgeType.CALLS).hasSize(1);
+
+        var utilModule = store.findNodesByType(NodeType.PY_MODULE).stream()
+            .filter(n -> n.filePath().equals("app/util.py")).findFirst().orElseThrow();
+        var utilModuleId = utilModule.id();
+
+        // Add a class with one method to main.py and re-sync incrementally.
+        Thread.sleep(100);
+        Files.writeString(mainFile, """
+            from .util import helper
+
+            def run():
+                return helper()
+
+            class Runner:
+                def go(self):
+                    return run()
+            """);
+        mainFile.toFile().setLastModified(System.currentTimeMillis() + 10000);
+
+        indexer.indexIncremental(proj);
+
+        assertThat(store.findNodesByType(NodeType.PY_CLASS)).hasSize(1);
+        assertThat(store.findNodesByType(NodeType.METHOD)).hasSize(3);
+
+        // util.py's module node id is unchanged.
+        var utilModuleAfter = store.findNodesByType(NodeType.PY_MODULE).stream()
+            .filter(n -> n.filePath().equals("app/util.py")).findFirst().orElseThrow();
+        assertThat(utilModuleAfter.id()).isEqualTo(utilModuleId);
+    }
 }

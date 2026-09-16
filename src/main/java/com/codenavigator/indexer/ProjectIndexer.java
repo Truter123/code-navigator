@@ -29,7 +29,7 @@ public class ProjectIndexer {
     private final TypeScriptMethodExtractor tsMethodExtractor;
     private final DartMethodExtractor dartMethodExtractor;
     private final DependencyParser dependencyParser;
-    private final List<LanguageIndexer> extraIndexers = List.of(new ShellIndexer(), new SqlIndexer());
+    private final List<LanguageIndexer> extraIndexers = List.of(new ShellIndexer(), new SqlIndexer(), new PythonIndexer());
 
     public ProjectIndexer(GraphStore store) {
         this.store = store;
@@ -818,7 +818,7 @@ public class ProjectIndexer {
     private void trackFile(Path projectPath, Path file) {
         try {
             String filePath = file.toString().endsWith(".java") || file.toString().endsWith(".sh")
-                    || file.toString().endsWith(".sql")
+                    || file.toString().endsWith(".sql") || file.toString().endsWith(".py")
                     ? projectPath.relativize(file).toString()
                     : file.toString();
             long lastModified = Files.getLastModifiedTime(file).toMillis();
