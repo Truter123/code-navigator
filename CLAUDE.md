@@ -18,8 +18,9 @@ that, and anything that does not reduce tokens does not belong here.
 
 ## Project Structure
 
-- `src/`, `build.gradle` — the server. Indexes Java, TypeScript and Groovy into a SQLite graph:
-  classes, methods, and the edges between them. Nine MCP tools, all `cg_*`.
+- `src/`, `build.gradle` — the server. Indexes Java, TypeScript, Groovy, Dart, Python, SQL and shell into a
+  SQLite graph: classes, methods, and the edges between them. Python, SQL and shell plug in through
+  `LanguageIndexer`; Java, TS, Groovy and Dart are still wired by hand in `ProjectIndexer`. Nine MCP tools, all `cg_*`.
 - `jars/` — built JAR, runner script, and the `auto-setup.sh` SessionStart hook.
 
 Data lives in `navigators/code/` inside each indexed project (gitignored).
@@ -117,6 +118,13 @@ autoincrement, so neither dedupes on insert: without this a second `init` double
 
 Wrap bulk writes in `store.batch(...)`. Saves autocommit otherwise, which under WAL is one fsync per
 row — unbatched git co-change mining alone took a full nlp index from 34 seconds to over 15 minutes.
+
+SQL is whole-history: a table's node is what the migrations say *today* (`V2` before `V10`,
+`DROP` removes, `RENAME TO` renames in place), so any changed `.sql` file rebuilds every SQL node
+(`SqlIndexer.rebuildAllOnChange`) and re-runs the edge pass. SQL node ids are stable
+(`sql:<table>`), so a Java class's `REFERENCES_TABLE` edge survives an SQL-only sync. SQL nodes
+must be stored before the Java and Python edge passes: they only emit `REFERENCES_TABLE` to a
+table that already exists, never create one.
 
 `GitHistoryAnalyzer` skips commits touching more than 50 files. Pair count is quadratic, so one
 1,000-file merge writes ~500,000 rows of files that were *merged* together, not changed together.

@@ -26,10 +26,16 @@ Every tool takes an optional `projectPath`, so one server answers for any indexe
 
 ## What it indexes
 
-Java, TypeScript and Groovy into a SQLite graph of classes **and methods**. Method nodes are
+Java, TypeScript, Groovy, Dart, Python, SQL and shell into a SQLite graph of classes **and methods**. Method nodes are
 addressed `Class#method(ParamTypes)` and carry `CALLS` and `OVERRIDES` edges, so "who calls this
 method" is a graph query rather than a search. On `nlp`: 8,504 nodes, 25,823 edges, 95% of calls into
 project types bound to a specific method, indexed in ~34 seconds.
+
+Python (`.py`): modules, classes, functions and methods, `IMPORTS`, `CALLS`, `EXTENDS`. SQL
+(`.sql`, Flyway order, last migration wins): tables, views, routines with `REFERENCES_FK` and
+`DERIVES_FROM` edges, plus `REFERENCES_TABLE` from any Java class (`@Table`, `@Entity`, native
+query strings) or Python function that names an existing table. Shell (`.sh`): scripts and
+functions, `SOURCES` between scripts, `RUNS` to a curated list of commands.
 
 It does **not** hold business rules, glossary terms, ADRs or troubleshooting notes. That was built
 and removed — this tool scans code.
