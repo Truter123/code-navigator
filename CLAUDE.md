@@ -84,6 +84,11 @@ through `MethodIds`. Three edges: `DECLARES_METHOD` (class→method), `CALLS` (m
 - **`DECLARES_METHOD` costs no depth and is crossed in either direction.** A class and its methods
   are one place, so `depth: 1` from a class still reaches the classes one call away. `GraphTraversal`
   uses 0-1 BFS; a plain FIFO queue settles nodes at the wrong depth.
+- **On a directional query a class entered from its own method is context only and expands
+  nothing.** Without this, `direction=in` on `SalesOrder#cancel` walked method → class → all 55
+  sibling methods and the class's own `INJECTS`/`USES_SERVICE` edges, and reported them as callers
+  (19 rows for 3 real callers). A class that is the start node, or reached over a directed edge,
+  expands as before.
 - **Results are filtered, never the traversal.** Asking about a class gets a class-level answer,
   asking about a method gets a method-level one (`applyGranularity`); the walk always passes through
   methods.
@@ -97,6 +102,12 @@ Where several same-arity overloads fit, all are linked — the receiver and name
 the signature is not, so linking each over-approximates which runs, while dropping would answer
 "nobody calls this". Indexing prints the bound rate; on `nlp` it is 95%, the rest Spring Data methods
 inherited from `JpaRepository`. `CODE_NAVIGATOR_DEBUG_CALLS=1` lists the top unresolved shapes.
+
+A receiver's simple type name resolves in this order: same package, explicit import, unique
+wildcard-import hit, then the unique `.java` candidate when the remaining matches are other
+languages. `Andon` and `SalesOrder` exist as a Java aggregate and an Angular model in `nlp`; a plain
+unique-simple-name rule dropped every call on them and the graph answered "no production caller" for
+`Andon#resolve` and `SalesOrder#cancel`. Two Java candidates with no import still resolve to none.
 
 ## Indexing
 

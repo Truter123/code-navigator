@@ -37,6 +37,12 @@ class MethodCallExtractorTest {
         store.saveNode(new Node(id, NodeType.METHOD, name, id, "x.java", 1, "", 0));
     }
 
+    /** A type node whose id is a bare simple name, as the TypeScript/Dart indexers store them. */
+    private void saveBareTypeScriptClass(String simpleName) {
+        store.saveNode(new Node(simpleName, NodeType.CLASS, simpleName, simpleName,
+            simpleName + ".ts", 1, "", 0));
+    }
+
     @Test
     void resolvesCallThroughInjectedField() {
         saveClass("com.sample.Handler", NodeType.COMMAND_HANDLER);
@@ -350,5 +356,97 @@ class MethodCallExtractorTest {
         var edges = new MethodCallExtractor(store).extract(cu);
 
         assertThat(edges).extracting(Edge::targetId).containsExactly("com.sample.Cache#get()");
+    }
+
+    @Test
+    void anExplicitImportPicksTheJavaTypeOverASameNamedFrontendModel() {
+        // SalesOrder exists twice in the indexed project: the Java aggregate and a TypeScript
+        // model of the same simple name (nlp / nlp-fe). Without the import, the simple-name match
+        // is ambiguous and the call used to be dropped.
+        saveClass("com.acme.sales.SalesOrder", NodeType.AGGREGATE);
+        saveMethod("com.acme.sales.SalesOrder", "cancel", "");
+        saveBareTypeScriptClass("SalesOrder");
+        saveClass("com.acme.infra.Svc", NodeType.SERVICE);
+        saveMethod("com.acme.infra.Svc", "delete", "SalesOrder");
+
+        var cu = StaticJavaParser.parse(
+            "package com.acme.infra;" +
+            "import com.acme.sales.SalesOrder;" +
+            "public class Svc {" +
+            "  void delete(SalesOrder so) { so.cancel(); }" +
+            "}");
+
+        var edges = new MethodCallExtractor(store).extract(cu);
+
+        assertThat(edges).extracting(Edge::targetId)
+            .containsExactly("com.acme.sales.SalesOrder#cancel()");
+    }
+
+    @Test
+    void anExplicitImportResolvesATypedLocalFromAMethodReturn() {
+        saveClass("com.acme.sales.SalesOrder", NodeType.AGGREGATE);
+        saveMethod("com.acme.sales.SalesOrder", "cancel", "");
+        saveBareTypeScriptClass("SalesOrder");
+        saveClass("com.acme.sales.Repo", NodeType.REPOSITORY);
+        saveMethod("com.acme.sales.Repo", "load", "UUID");
+        saveClass("com.acme.infra.Svc", NodeType.SERVICE);
+        saveMethod("com.acme.infra.Svc", "delete", "UUID");
+
+        var cu = StaticJavaParser.parse(
+            "package com.acme.infra;" +
+            "import com.acme.sales.SalesOrder;" +
+            "import com.acme.sales.Repo;" +
+            "public class Svc {" +
+            "  private Repo repo;" +
+            "  void delete(java.util.UUID id) { SalesOrder so = repo.load(id); so.cancel(); }" +
+            "}");
+
+        var edges = new MethodCallExtractor(store).extract(cu);
+
+        assertThat(edges).extracting(Edge::targetId).contains("com.acme.sales.SalesOrder#cancel()");
+    }
+
+    @Test
+    void aWildcardImportPicksTheJavaTypeOverASameNamedFrontendModel() {
+        saveClass("com.acme.sales.SalesOrder", NodeType.AGGREGATE);
+        saveMethod("com.acme.sales.SalesOrder", "cancel", "");
+        saveBareTypeScriptClass("SalesOrder");
+        saveClass("com.acme.infra.Svc", NodeType.SERVICE);
+        saveMethod("com.acme.infra.Svc", "delete", "SalesOrder");
+
+        var cu = StaticJavaParser.parse(
+            "package com.acme.infra;" +
+            "import com.acme.sales.*;" +
+            "public class Svc {" +
+            "  void delete(SalesOrder so) { so.cancel(); }" +
+            "}");
+
+        var edges = new MethodCallExtractor(store).extract(cu);
+
+        assertThat(edges).extracting(Edge::targetId)
+            .containsExactly("com.acme.sales.SalesOrder#cancel()");
+    }
+
+    @Test
+    void twoJavaCandidatesWithNoImportStayAmbiguous() {
+        // Ambiguity between two candidates of the *same* language is not resolved by guessing —
+        // only the cross-language collision (Java vs. TypeScript/Dart) gets a same-language
+        // shortcut.
+        saveClass("com.a.SalesOrder", NodeType.AGGREGATE);
+        saveMethod("com.a.SalesOrder", "cancel", "");
+        saveClass("com.b.SalesOrder", NodeType.AGGREGATE);
+        saveMethod("com.b.SalesOrder", "cancel", "");
+        saveClass("com.acme.infra.Svc", NodeType.SERVICE);
+        saveMethod("com.acme.infra.Svc", "delete", "SalesOrder");
+
+        var cu = StaticJavaParser.parse(
+            "package com.acme.infra;" +
+            "public class Svc {" +
+            "  void delete(SalesOrder so) { so.cancel(); }" +
+            "}");
+
+        var edges = new MethodCallExtractor(store).extract(cu);
+
+        assertThat(edges).isEmpty();
     }
 }

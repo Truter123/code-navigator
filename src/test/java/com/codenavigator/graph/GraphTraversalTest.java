@@ -209,9 +209,12 @@ class GraphTraversalTest {
     // ---- Method-level traversal ----
 
     /**
-     * Two classes, each with one method, wired A.a() -> B.b():
+     * Two classes wired A.a() -> B.b(), each also declaring an unrelated sibling method with no
+     * CALLS edge (A#other(), B#other()), to prove the free DECLARES_METHOD hop never leaks a
+     * class's other methods into a directional caller/callee answer:
      * <pre>
      *   A --DECLARES_METHOD--> A#a() --CALLS--> B#b() &lt;--DECLARES_METHOD-- B
+     *   A --DECLARES_METHOD--> A#other()          B --DECLARES_METHOD--> B#other()
      * </pre>
      */
     private void buildMethodGraph() {
@@ -219,8 +222,12 @@ class GraphTraversalTest {
         store.saveNode(new Node("B", NodeType.SERVICE, "B", "B", "B.java", 1, "", 0));
         store.saveNode(new Node("A#a()", NodeType.METHOD, "a", "A#a()", "A.java", 2, "", 0));
         store.saveNode(new Node("B#b()", NodeType.METHOD, "b", "B#b()", "B.java", 2, "", 0));
+        store.saveNode(new Node("A#other()", NodeType.METHOD, "other", "A#other()", "A.java", 3, "", 0));
+        store.saveNode(new Node("B#other()", NodeType.METHOD, "other", "B#other()", "B.java", 3, "", 0));
         store.saveEdge(new Edge("d1", EdgeType.DECLARES_METHOD, "A", "A#a()"));
         store.saveEdge(new Edge("d2", EdgeType.DECLARES_METHOD, "B", "B#b()"));
+        store.saveEdge(new Edge("d4", EdgeType.DECLARES_METHOD, "A", "A#other()"));
+        store.saveEdge(new Edge("d5", EdgeType.DECLARES_METHOD, "B", "B#other()"));
         store.saveEdge(new Edge("c1", EdgeType.CALLS, "A#a()", "B#b()"));
     }
 
@@ -240,6 +247,55 @@ class GraphTraversalTest {
 
         assertThat(nodeIds(traversal.callees("A#a()", 1))).contains("B#b()");
         assertThat(nodeIds(traversal.callers("B#b()", 1))).contains("A#a()");
+    }
+
+    @Test
+    void callersDoesNotLeakSiblingMethodsOfTheDeclaringClass() {
+        buildMethodGraph();
+
+        Set<String> ids = nodeIds(traversal.callers("B#b()", 1));
+        assertThat(ids).contains("A#a()");
+        assertThat(ids).doesNotContain("B#other()", "A#other()");
+    }
+
+    @Test
+    void calleesDoesNotLeakSiblingMethodsOfTheDeclaringClass() {
+        buildMethodGraph();
+
+        Set<String> ids = nodeIds(traversal.callees("A#a()", 1));
+        assertThat(ids).contains("B#b()");
+        assertThat(ids).doesNotContain("A#other()", "B#other()");
+    }
+
+    @Test
+    void callersFromAClassStartNodeStillFansOutToItsMethods() {
+        buildMethodGraph();
+
+        assertThat(nodeIds(traversal.callers("B", 1))).contains("A#a()");
+    }
+
+    @Test
+    void contextOnlyClassExpandsNoEdgesOfItsOwn() {
+        // E injects B (a class-level, directed call edge) and declares E#apply(), which has no
+        // call edge of its own. B#b() only ever reaches B as context via the free method->class
+        // hop, so B must not fan out into its own INJECTS callers (E) nor E's own methods — those
+        // belong to a query that actually starts at B, not one that merely named it in passing.
+        buildMethodGraph();
+        store.saveNode(new Node("E", NodeType.SERVICE, "E", "E", "E.java", 1, "", 0));
+        store.saveNode(new Node("E#apply()", NodeType.METHOD, "apply", "E#apply()", "E.java", 2, "", 0));
+        store.saveEdge(new Edge("d6", EdgeType.DECLARES_METHOD, "E", "E#apply()"));
+        store.saveEdge(new Edge("e12", EdgeType.INJECTS, "E", "B"));
+
+        Set<String> depthOne = nodeIds(traversal.callers("B#b()", 1));
+        assertThat(depthOne).contains("A#a()");
+        assertThat(depthOne).doesNotContain("E", "E#apply()");
+
+        Set<String> depthTwo = nodeIds(traversal.callers("B#b()", 2));
+        assertThat(depthTwo).contains("A#a()");
+        assertThat(depthTwo).doesNotContain("E", "E#apply()");
+
+        // Starting the query at the class itself, E is a real hit again.
+        assertThat(nodeIds(traversal.callers("B", 1))).contains("E");
     }
 
     @Test

@@ -52,6 +52,15 @@ public class MethodCallExtractor {
     private final Set<String> knownTypeIds = new HashSet<>();
 
     /**
+     * Source file per type node id, used only to tell a Java candidate from a TypeScript/Dart one
+     * when a simple name is ambiguous across languages of the same indexed project (see
+     * {@link #isJavaType}). The other indexers store bare simple names as ids (CLAUDE.md, Symbol
+     * resolution), so an id containing a '.' is not itself a reliable language signal once a Java
+     * type happens to sit in the default package.
+     */
+    private final Map<String, String> typeFilePathById = new HashMap<>();
+
+    /**
      * Call-site counters for the indexer's summary line.
      *
      * <p>Split deliberately. Most call sites in any codebase target types this graph does not
@@ -90,6 +99,7 @@ public class MethodCallExtractor {
             } else {
                 knownTypeIds.add(n.id());
                 typeIdsBySimpleName.computeIfAbsent(n.name(), k -> new ArrayList<>()).add(n.id());
+                typeFilePathById.put(n.id(), n.filePath());
             }
         }
     }
@@ -104,6 +114,8 @@ public class MethodCallExtractor {
     private String currentCallerId;
     private Map<String, String> currentStaticImports = Map.of();
     private List<String> currentStaticWildcards = List.of();
+    private Map<String, String> currentImports = Map.of();
+    private List<String> currentWildcardImports = List.of();
 
     /** Receiver type not knowable from source, or known but not indexed (JDK, framework). */
     public int receiverExternal() { return receiverExternal; }
@@ -148,6 +160,26 @@ public class MethodCallExtractor {
         });
         this.currentStaticImports = staticImportByName;
         this.currentStaticWildcards = staticWildcardTypes;
+
+        // Type imports: the receiver-type disambiguator for a simple name that collides across
+        // languages of the same indexed project (an `Andon` aggregate and an Angular `Andon`
+        // model both indexed) or across Java packages.
+        var importByName = new HashMap<String, String>();
+        var wildcardImportPackages = new ArrayList<String>();
+        cu.getImports().forEach(imp -> {
+            if (imp.isStatic()) return;
+            String name = imp.getNameAsString();
+            if (imp.isAsterisk()) {
+                wildcardImportPackages.add(name);
+                return;
+            }
+            int lastDot = name.lastIndexOf('.');
+            if (lastDot > 0) {
+                importByName.put(name.substring(lastDot + 1), name);
+            }
+        });
+        this.currentImports = importByName;
+        this.currentWildcardImports = wildcardImportPackages;
 
         cu.findAll(ClassOrInterfaceDeclaration.class).forEach(decl -> {
             String ownerFqn = packageName.isEmpty() ? decl.getNameAsString()
@@ -294,14 +326,50 @@ public class MethodCallExtractor {
         return params.isBlank() ? 0 : params.split(",").length;
     }
 
-    /** Same-package first, then a unique simple-name match; ambiguity resolves to none. */
+    /**
+     * Resolve a declared or referenced simple type name to an indexed node id.
+     *
+     * <p>Tried in order: the same package (existing declaration wins over an import of the same
+     * simple name), an explicit {@code import a.b.C;}, a unique hit through a wildcard {@code import
+     * a.b.*;}, then — for a name that still matches more than one indexed type — the same-language
+     * candidates. A name shared between a Java aggregate and a TypeScript/Dart model of the same
+     * name (CLAUDE.md, Symbol resolution) used to make every such receiver unresolvable; restricting
+     * to Java candidates here recovers it without guessing across languages. Still ambiguous (two
+     * Java candidates, no import) resolves to none, as before.
+     */
     private Optional<String> resolveTypeToNodeId(String simpleName, String packageName) {
         if (!packageName.isEmpty()) {
             String fqn = packageName + "." + simpleName;
             if (knownTypeIds.contains(fqn)) return Optional.of(fqn);
         }
+
+        String imported = currentImports.get(simpleName);
+        if (imported != null) {
+            return knownTypeIds.contains(imported) ? Optional.of(imported) : Optional.empty();
+        }
+
         var matches = typeIdsBySimpleName.getOrDefault(simpleName, List.of());
-        return matches.size() == 1 ? Optional.of(matches.get(0)) : Optional.empty();
+        if (matches.size() == 1) return Optional.of(matches.get(0));
+        if (matches.isEmpty()) return Optional.empty();
+
+        var wildcardMatches = currentWildcardImports.stream()
+            .map(pkg -> pkg + "." + simpleName)
+            .filter(knownTypeIds::contains)
+            .distinct()
+            .toList();
+        if (wildcardMatches.size() == 1) return Optional.of(wildcardMatches.get(0));
+
+        var javaMatches = matches.stream().filter(this::isJavaType).toList();
+        if (javaMatches.size() == 1) return Optional.of(javaMatches.get(0));
+
+        return Optional.empty();
+    }
+
+    /** Whether a type node's source lives in a {@code .java} file, as opposed to another indexed
+     *  language storing a colliding simple name. */
+    private boolean isJavaType(String typeId) {
+        String path = typeFilePathById.get(typeId);
+        return path != null && path.endsWith(".java");
     }
 
     /**

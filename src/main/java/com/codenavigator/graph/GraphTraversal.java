@@ -97,12 +97,21 @@ public class GraphTraversal {
         Map<String, Integer> depth = new LinkedHashMap<>();
         Deque<String> deque = new ArrayDeque<>();
 
+        // A class reached only via the free method->class hop is context, not a real hit: it is
+        // emitted for display but expands no edges of its own — not its DECLARES_METHOD fan-out to
+        // sibling methods, and not its own class-level call edges (INJECTS, USES_SERVICE, ...),
+        // which belong to the class as a hit, not to the method that happened to name it. A class
+        // that is the start node, or that is reached over a directed edge, is a real hit and keeps
+        // expanding normally. Irrelevant for BOTH, which keeps today's behaviour.
+        Set<String> contextOnly = new HashSet<>();
+
         depth.put(startId, 0);
         deque.add(startId);
 
         while (!deque.isEmpty()) {
             String currentId = deque.pollFirst();
             int currentDepth = depth.get(currentId);
+            if (direction != Direction.BOTH && contextOnly.contains(currentId)) continue;
 
             // Both directions are gathered every time; a free hop is containment rather than a
             // call, so it is crossed whichever way it points even on a directional query. Reaching
@@ -133,6 +142,15 @@ public class GraphTraversal {
 
                 depth.put(neighborId, neighborDepth);
                 if (free) deque.addFirst(neighborId); else deque.addLast(neighborId);
+
+                if (direction != Direction.BOTH) {
+                    if (!free) {
+                        contextOnly.remove(neighborId);
+                    } else if (!outgoing && !neighborId.equals(startId)) {
+                        // method->class hop: neighborId is the declaring class, entered as context.
+                        contextOnly.add(neighborId);
+                    }
+                }
 
                 if (!neighborId.equals(startId) && emitted.add(neighborId)) {
                     store.findNodeById(neighborId).ifPresent(result::add);
