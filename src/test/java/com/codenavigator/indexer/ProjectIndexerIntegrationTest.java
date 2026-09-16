@@ -321,4 +321,49 @@ class ProjectIndexerIntegrationTest {
         // One new SHELL_COMMAND node for "git"; everything else unchanged.
         assertThat(store.getAllNodes().size()).isEqualTo(nodeCountBeforeIncremental + 1);
     }
+
+    @Test
+    void indexesSqlMigrationsWithRenameAndLaterView() throws Exception {
+        var proj = tempDir.resolve("sql-proj");
+        var migrations = proj.resolve("db/migration");
+        Files.createDirectories(migrations);
+        Files.writeString(migrations.resolve("V1__init.sql"), """
+            CREATE TABLE bar (id INT PRIMARY KEY);
+            CREATE TABLE foo (id INT PRIMARY KEY, bar_id INT REFERENCES bar(id));
+            """);
+        Files.writeString(migrations.resolve("V2__rename.sql"), """
+            ALTER TABLE foo RENAME TO renamed_foo;
+            """);
+
+        indexer.indexFull(proj);
+
+        var tables = store.findNodesByType(NodeType.SQL_TABLE);
+        assertThat(tables).hasSize(2);
+        assertThat(tables).extracting("name").containsExactlyInAnyOrder("bar", "renamed_foo");
+        assertThat(store.getAllEdges())
+            .filteredOn(e -> e.type() == com.codenavigator.graph.EdgeType.REFERENCES_FK)
+            .hasSize(1);
+
+        var barNode = tables.stream().filter(n -> n.name().equals("bar")).findFirst().orElseThrow();
+        var renamedFooNode = tables.stream().filter(n -> n.name().equals("renamed_foo")).findFirst().orElseThrow();
+
+        // Add a view over the renamed table and re-sync incrementally.
+        Thread.sleep(100);
+        Files.writeString(migrations.resolve("V3__view.sql"), """
+            CREATE VIEW renamed_foo_view AS SELECT * FROM renamed_foo;
+            """);
+
+        indexer.indexIncremental(proj);
+
+        var views = store.findNodesByType(NodeType.SQL_VIEW);
+        assertThat(views).hasSize(1);
+        assertThat(views.getFirst().name()).isEqualTo("renamed_foo_view");
+        assertThat(store.getAllEdges())
+            .filteredOn(e -> e.type() == com.codenavigator.graph.EdgeType.DERIVES_FROM)
+            .anyMatch(e -> e.sourceId().equals(views.getFirst().id()) && e.targetId().equals(renamedFooNode.id()));
+
+        // The untouched table nodes still exist with the same ids.
+        assertThat(store.findNodeById(barNode.id())).isPresent();
+        assertThat(store.findNodeById(renamedFooNode.id())).isPresent();
+    }
 }

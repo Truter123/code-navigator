@@ -2,9 +2,11 @@ package com.codenavigator.indexer;
 
 import com.codenavigator.graph.Edge;
 import com.codenavigator.graph.Node;
+import com.codenavigator.graph.NodeType;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Seam for a language indexed alongside the hand-wired Java/TypeScript/Groovy/Dart pipeline.
@@ -44,5 +46,24 @@ public interface LanguageIndexer {
      */
     default boolean rebuildAllOnChange() {
         return false;
+    }
+
+    /**
+     * Whole-history scan run once per indexing run, before any {@link #indexFile} call for this
+     * indexer, over every file this indexer matches (already in Flyway/path order for SQL). A
+     * no-op for indexers with no cross-file semantics (shell); SQL uses it to build the final
+     * schema model in memory — last migration wins for a dropped or renamed object — so {@link
+     * #indexFile} and {@link #extractEdges} just read from it.
+     */
+    default void prepare(List<Path> files, Path projectRoot) {
+    }
+
+    /**
+     * The {@link NodeType}s this indexer owns, so {@link ProjectIndexer} can delete every node of
+     * those types and re-run {@link #prepare} + {@link #indexFile} over the full file list when
+     * {@link #rebuildAllOnChange} fires, without hard-coding the type list itself.
+     */
+    default Set<NodeType> ownedTypes() {
+        return Set.of();
     }
 }

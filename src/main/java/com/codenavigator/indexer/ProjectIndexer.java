@@ -29,7 +29,7 @@ public class ProjectIndexer {
     private final TypeScriptMethodExtractor tsMethodExtractor;
     private final DartMethodExtractor dartMethodExtractor;
     private final DependencyParser dependencyParser;
-    private final List<LanguageIndexer> extraIndexers = List.of(new ShellIndexer());
+    private final List<LanguageIndexer> extraIndexers = List.of(new ShellIndexer(), new SqlIndexer());
 
     public ProjectIndexer(GraphStore store) {
         this.store = store;
@@ -129,6 +129,7 @@ public class ProjectIndexer {
         // 4d. Phase 1f: Extract nodes from extra-language files (shell today; SQL/Python later)
         store.batch(() -> {
             for (var entry : extraFilesByIndexer.entrySet()) {
+                entry.getKey().prepare(entry.getValue(), projectPath);
                 for (Path file : entry.getValue()) {
                     for (Node node : entry.getKey().indexFile(file, projectPath)) {
                         store.saveNode(node);
@@ -374,7 +375,11 @@ public class ProjectIndexer {
      * exist, then {@code fileNodes} is re-read from the store so edge extraction sees both.
      */
     private void extractExtraLanguageEdges(Map<LanguageIndexer, List<Path>> extraFilesByIndexer, Path projectPath) {
-        var known = KnownNames.empty();
+        var sqlTables = new java.util.HashSet<String>();
+        for (Node n : store.findNodesByType(NodeType.SQL_TABLE)) {
+            sqlTables.add(n.name());
+        }
+        var known = new KnownNames(sqlTables);
         for (var entry : extraFilesByIndexer.entrySet()) {
             LanguageIndexer indexer = entry.getKey();
             for (Path file : entry.getValue()) {
@@ -567,7 +572,29 @@ public class ProjectIndexer {
         boolean anyChanged = false;
         for (var entry : extraFilesByIndexer.entrySet()) {
             LanguageIndexer indexer = entry.getKey();
-            for (Path file : entry.getValue()) {
+            List<Path> files = entry.getValue();
+            // Whole-history indexers (SQL) need the model rebuilt from every file, every run,
+            // before indexFile/extractEdges can answer for any one of them.
+            indexer.prepare(files, projectPath);
+
+            if (indexer.rebuildAllOnChange()) {
+                if (anyExtraFileChangedOrDeleted(indexer, files, projectPath)) {
+                    for (NodeType type : indexer.ownedTypes()) {
+                        for (Node node : store.findNodesByType(type)) {
+                            store.deleteNode(node.id());
+                        }
+                    }
+                    for (Path file : files) {
+                        for (Node node : indexer.indexFile(file, projectPath)) {
+                            store.saveNode(node);
+                        }
+                    }
+                    anyChanged = true;
+                }
+                continue;
+            }
+
+            for (Path file : files) {
                 var filePath = projectPath.relativize(file).toString();
                 try {
                     if (!isFileChanged(file, filePath)) continue;
@@ -582,6 +609,28 @@ public class ProjectIndexer {
             }
         }
         return anyChanged;
+    }
+
+    /**
+     * True if any of {@code files} changed content, or a previously tracked file this indexer
+     * matches no longer exists — either forces a {@link LanguageIndexer#rebuildAllOnChange}
+     * indexer to redo its whole-history scan.
+     */
+    private boolean anyExtraFileChangedOrDeleted(LanguageIndexer indexer, List<Path> files, Path projectPath) {
+        for (Path file : files) {
+            var filePath = projectPath.relativize(file).toString();
+            try {
+                if (isFileChanged(file, filePath)) return true;
+            } catch (IOException e) {
+                return true;
+            }
+        }
+        for (String tracked : store.getAllIndexedFiles()) {
+            Path p = Path.of(tracked);
+            if (!p.isAbsolute()) p = projectPath.resolve(tracked);
+            if (indexer.matches(p) && !Files.exists(p)) return true;
+        }
+        return false;
     }
 
     /**
@@ -769,6 +818,7 @@ public class ProjectIndexer {
     private void trackFile(Path projectPath, Path file) {
         try {
             String filePath = file.toString().endsWith(".java") || file.toString().endsWith(".sh")
+                    || file.toString().endsWith(".sql")
                     ? projectPath.relativize(file).toString()
                     : file.toString();
             long lastModified = Files.getLastModifiedTime(file).toMillis();
