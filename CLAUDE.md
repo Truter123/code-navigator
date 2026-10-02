@@ -53,18 +53,26 @@ The rules that keep responses small. Breaking one is a regression even if tests 
 
 - **Every list-producing tool takes `limit` and honours it.** `cg_search` once advertised `limit` and
   ignored it, returning 3,755 tokens for a query the caller answered from the first five rows.
-- **Summarise, don't enumerate.** `cg_map` prints one line per root with a reach count, not a
-  per-type breakdown under each; `cg_guard` names DDD-significant nodes and counts the rest.
-  Measured: 1,780 → 576 and 135 lines → 22.
+- **Summarise, don't enumerate.** `cg_map` lists bare root names and states the reach they share
+  once instead of a count per root, counts the test roots it leaves out and prints no paths;
+  `cg_guard` names DDD-significant nodes, counts the rest and the test-only share, and ends with the
+  `cg_related` call that lists the type rows (methods left out; a reply holds only as many as the cap allows). Measured: 1,780 → 576 and 135 lines → 22.
 - **Truncation cuts whole lines and says what was dropped**, with the parameter that would narrow the
   query. A blind `substring` severed the last entry and read exactly like a complete answer.
+  Every answer is capped at 6,000 characters (about 1,500 tokens): a list tool whose `limit` would pass
+  it is re-run with the largest `limit` that fits and says so, and a cut note names only that tool's
+  own parameters.
 - **Nothing writes files.** Generated markdown was the single largest context cost in `nlp` —
   256 KB duplicating a graph that answers the same questions in hundreds of tokens.
 - **Short names plus `file:line`.** The path already carries the package; repeating the fqn spends
   tokens on nothing. Ids stay fully qualified only where they must be typed back in.
 
-Current cost on `nlp` (8,504 nodes): eight representative answers total ~2,644 tokens, none over
-1,500. `java -jar jars/code-navigator.jar benchmark <project>` measures against reading raw source.
+Current cost on `nlp-be` (11,911 nodes, measured 2026-10-02): the six-call research ladder (`cg_map`,
+`cg_context`, `cg_node`, `cg_related`, `cg_guard`, `cg_health hotspots`) is 7,483 bytes, about 1,870
+tokens at ~4 bytes each; its largest answer, `cg_guard` on `SalesOrder`, is 1,716 bytes, and no answer
+can pass the 6,000-character cap. `java -jar jars/code-navigator.jar benchmark <project>` measures
+against reading raw source; on `nlp` it reports `symbol-impact` 399,259 -> 97,577 tokens (75.6% saved),
+`compact-export` 24.2% saved and `semantic-context` -10.9% (the navigator side is the larger one there).
 
 ## One server, many projects
 

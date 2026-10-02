@@ -742,28 +742,48 @@ public class GraphStore implements AutoCloseable {
     public record NodeCount(Node node, int count) {}
 
     public List<NodeCount> findTopFanIn(int limit) {
-        String sql = """
-            SELECT n.*, COUNT(e.id) as edge_count
-            FROM nodes n JOIN edges e ON e.target_id = n.id
-            GROUP BY n.id ORDER BY edge_count DESC LIMIT ?""";
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setInt(1, limit);
-            return mapNodeCounts(ps.executeQuery());
-        } catch (SQLException e) {
-            throw new RuntimeException("Failed to find top fan-in", e);
-        }
+        return findTopFanIn(limit, null);
+    }
+
+    /** Top fan-in among the nodes under {@code packagePrefix} (that package and its sub-packages); null means all. */
+    public List<NodeCount> findTopFanIn(int limit, String packagePrefix) {
+        return topByEdges("target_id", limit, packagePrefix);
     }
 
     public List<NodeCount> findTopFanOut(int limit) {
-        String sql = """
-            SELECT n.*, COUNT(e.id) as edge_count
-            FROM nodes n JOIN edges e ON e.source_id = n.id
-            GROUP BY n.id ORDER BY edge_count DESC LIMIT ?""";
+        return findTopFanOut(limit, null);
+    }
+
+    /** Top fan-out among the nodes under {@code packagePrefix} (that package and its sub-packages); null means all. */
+    public List<NodeCount> findTopFanOut(int limit, String packagePrefix) {
+        return topByEdges("source_id", limit, packagePrefix);
+    }
+
+    /** Top fan-out among the non-method nodes under {@code packagePrefix}: the types, not their methods. */
+    public List<NodeCount> findTopFanOutTypes(int limit, String packagePrefix) {
+        return topByEdges("source_id", limit, packagePrefix, true);
+    }
+
+    private List<NodeCount> topByEdges(String endColumn, int limit, String packagePrefix) {
+        return topByEdges(endColumn, limit, packagePrefix, false);
+    }
+
+    private List<NodeCount> topByEdges(String endColumn, int limit, String packagePrefix, boolean typesOnly) {
+        String where = (packagePrefix == null ? "" : "n.qualified_name LIKE ? ESCAPE '\\' ")
+            + (packagePrefix != null && typesOnly ? "AND " : "")
+            + (typesOnly ? "n.type <> 'METHOD' " : "");
+        String scope = where.isEmpty() ? "" : "WHERE " + where;
+        String sql = "SELECT n.*, COUNT(e.id) as edge_count FROM nodes n JOIN edges e ON e." + endColumn
+            + " = n.id " + scope + "GROUP BY n.id ORDER BY edge_count DESC LIMIT ?";
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setInt(1, limit);
+            int next = 1;
+            if (packagePrefix != null) {
+                ps.setString(next++, packagePrefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + ".%");
+            }
+            ps.setInt(next, limit);
             return mapNodeCounts(ps.executeQuery());
         } catch (SQLException e) {
-            throw new RuntimeException("Failed to find top fan-out", e);
+            throw new RuntimeException("Failed to find top fan-" + (endColumn.equals("target_id") ? "in" : "out"), e);
         }
     }
 

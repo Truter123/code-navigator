@@ -25,6 +25,15 @@ public class GraphTraversal {
         return type == EdgeType.DECLARES_METHOD;
     }
 
+    /**
+     * Whether {@link #callers} and {@link #callees} follow this edge type. The others (RETURNS_TYPE,
+     * EMITS_EVENT, EXTENDS, ...) only appear in the undirected {@link #impact} walk, so a pointer
+     * that lists them has to ask for that one.
+     */
+    public static boolean followedDirectionally(EdgeType type) {
+        return CALL_EDGE_TYPES.contains(type);
+    }
+
     private final GraphStore store;
 
     public GraphTraversal(GraphStore store) {

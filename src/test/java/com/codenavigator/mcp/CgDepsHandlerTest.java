@@ -8,6 +8,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -103,5 +105,75 @@ class CgDepsHandlerTest {
         var result = emptyServer.handleCgDeps(Map.of());
         assertThat(result).contains("No dependency");
         emptyStore.close();
+    }
+
+    @Test
+    void cgDepsHasNoCollapsedLineWhenEveryDependencyIsUsed() {
+        var result = mcpServer.handleCgDeps(Map.of());
+        assertThat(result).doesNotContain("no used type");
+    }
+
+    @Test
+    void cgDepsCollapsesDependenciesWithNoUsedTypeIntoOneLine() {
+        var result = depsOf(List.of(
+                "org.springframework.boot:spring-boot-starter-web:3.2.0",
+                "org.postgresql:postgresql:42.7.0",
+                "org.flywaydb:flyway-core:10.0.0",
+                "org.projectlombok:lombok:1.18.30"),
+            "org.springframework.boot:spring-boot-starter-web");
+
+        assertThat(result).contains("4 declared dependencies:");
+        assertThat(result).contains("- **org.springframework.boot:spring-boot-starter-web** (3.2.0) — 1 type(s) used");
+        assertThat(result).contains("- 3 declared dependencies with no used type: "
+            + "org.postgresql:postgresql, org.flywaydb:flyway-core, org.projectlombok:lombok\n");
+        assertThat(result).doesNotContain("0 type(s) used");
+    }
+
+    @Test
+    void cgDepsCapsTheNamesOnTheNoUsedTypeLineAndCountsTheRest() {
+        var declared = new ArrayList<String>();
+        for (int i = 1; i <= 11; i++) declared.add("org.example:lib-" + i + ":1.0");
+
+        var result = depsOf(declared);
+
+        assertThat(result).contains("- 11 declared dependencies with no used type: "
+            + "org.example:lib-1, org.example:lib-2, org.example:lib-3, org.example:lib-4, "
+            + "org.example:lib-5, org.example:lib-6, org.example:lib-7, org.example:lib-8, "
+            + "… +3 more (see the build file)\n");
+        assertThat(result).doesNotContain("lib-9");
+    }
+
+    @Test
+    void cgDepsDropsTheVersionMarkerForADependencyDeclaredWithoutOne() {
+        var result = depsOf(List.of(
+                "org.springframework.boot:spring-boot-starter-web",
+                "org.hibernate:hibernate-core:6.4.0",
+                "org.postgresql:postgresql"),
+            "org.springframework.boot:spring-boot-starter-web", "org.hibernate:hibernate-core");
+
+        assertThat(result).contains("- **org.springframework.boot:spring-boot-starter-web** — 1 type(s) used");
+        assertThat(result).contains("- **org.hibernate:hibernate-core** (6.4.0) — 1 type(s) used");
+        assertThat(result).contains("- 1 declared dependency with no used type: org.postgresql:postgresql\n");
+        assertThat(result).doesNotContain("(?)");
+    }
+
+    /**
+     * cg_deps over a fresh store: the declared {@code g:a[:v]} coordinates, and one LIBRARY node for
+     * each {@code g:a} in {@code used}. Call it once per test; the store file name is fixed.
+     */
+    private String depsOf(List<String> declared, String... used) {
+        var fresh = new GraphStore(tempDir.resolve("fresh.db"));
+        try {
+            for (String coordinate : used) {
+                fresh.saveNode(new Node("lib." + coordinate + ".Type", NodeType.LIBRARY, "Type",
+                    "lib." + coordinate + ".Type", "", 0, coordinate, 0));
+            }
+            fresh.setConfig("dependencies", "[\"" + String.join("\",\"", declared) + "\"]");
+            var traversal = new GraphTraversal(fresh);
+            var server = new CodeNavigatorMcpServer(fresh, traversal, new SearchService(fresh, traversal));
+            return server.handleCgDeps(Map.of());
+        } finally {
+            fresh.close();
+        }
     }
 }

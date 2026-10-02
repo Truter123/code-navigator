@@ -61,7 +61,7 @@ public class GuardReportBuilder {
 
         // Blast radius, summarised. Listing every node made this report 135 lines on a single
         // method, most of them test cases; the DDD-significant nodes are named and the rest are
-        // counted, with cg_impact available when the full list is actually wanted.
+        // counted, with cg_related one call away when the full list is actually wanted.
         sb.append("### Blast radius (depth ").append(depth).append("): ")
           .append(impacted.size()).append(" node(s)\n");
 
@@ -72,11 +72,9 @@ public class GuardReportBuilder {
 
         if (!significant.isEmpty()) {
             sb.append("DDD-significant (").append(significant.size()).append("):\n");
-            // Short name plus file:line, as every other tool renders a node — the path already
-            // carries the package, so repeating the fqn spends tokens on nothing.
-            significant.stream().limit(12).forEach(n ->
-                sb.append("- **").append(n.type()).append("** `").append(n.name())
-                  .append("` (").append(n.filePath()).append(":").append(n.lineNumber()).append(")\n"));
+            // Same rows as every other list tool: the directory once, then File.java:line Name TYPE.
+            // The path already carries the package, so repeating the fqn spends tokens on nothing.
+            DirectoryRows.appendNodes(sb, significant.stream().limit(12).toList(), true);
             if (significant.size() > 12) {
                 sb.append("- … ").append(significant.size() - 12).append(" more\n");
             }
@@ -93,9 +91,20 @@ public class GuardReportBuilder {
 
         long testCount = impacted.size() - production.size();
         if (testCount > 0) {
-            sb.append("Test sources: ").append(testCount).append(" (not counted above)\n");
+            sb.append("Test sources: ").append(testCount).append("\n");
         }
-        sb.append("\nFull list: cg_impact(symbol, depth ").append(depth).append(").\n");
+        // cg_related lists a class's blast radius as types, without the methods the count above includes,
+        // so the limit that shows every row is the number of those rows. It shows 10 by default and no
+        // reply holds more than the output cap, so this points at the rows and does not promise them all.
+        if (!impacted.isEmpty()) {
+            int rows = CodeNavigatorMcpServer.applyGranularity(impacted, Map.of(), startNode.orElse(null)).size();
+            boolean methodsOnly = rows == 0;
+            sb.append("\nMore: cg_related(symbol, depth ").append(depth);
+            if (methodsOnly) sb.append(", granularity all");
+            sb.append(", limit ").append(methodsOnly ? impacted.size() : rows).append(")");
+            if (!methodsOnly && rows < impacted.size()) sb.append(", methods left out");
+            sb.append(".\n");
+        }
 
         if (!isDdd) {
             sb.append("\n> _Non-DDD tier (`").append(tier != null ? tier : "unknown")
@@ -104,12 +113,16 @@ public class GuardReportBuilder {
         return sb.toString();
     }
 
-    /** Source that only tests reach is rarely what a guard is warning about. */
+    /**
+     * Source that only tests reach is rarely what a guard is warning about. Node paths are
+     * repo-relative, so a directory rule cannot require a leading slash.
+     */
     private static boolean isTestSource(Node node) {
         String path = node.filePath();
         if (path == null) return false;
-        return path.contains("/src/test/") || path.contains("\\src\\test\\")
-            || path.endsWith("Test.java") || path.endsWith(".spec.ts") || path.contains("/e2e/");
+        String p = path.replace('\\', '/');
+        return TestPaths.isUnderSrcTest(p)
+            || p.endsWith("Test.java") || p.endsWith(".spec.ts") || p.startsWith("e2e/") || p.contains("/e2e/");
     }
 
 
