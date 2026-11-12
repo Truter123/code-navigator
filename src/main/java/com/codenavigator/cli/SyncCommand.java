@@ -19,10 +19,19 @@ public class SyncCommand implements Runnable {
             return;
         }
 
-        try (var store = new GraphStore(ProjectPaths.graphDb(projectPath))) {
+        try (var lock = IndexLock.acquire(projectPath);
+             var store = new GraphStore(ProjectPaths.graphDb(projectPath))) {
             var indexer = new ProjectIndexer(store);
-            indexer.indexIncremental(projectPath);
+            var result = indexer.indexIncremental(projectPath);
+            if (result.line() != null) System.out.println(result.line());
+            try {
+                java.nio.file.Files.deleteIfExists(ProjectPaths.dirtyFile(projectPath));
+            } catch (java.io.IOException e) {
+                System.err.println("Could not clear the dirty flag: " + e.getMessage());
+            }
             System.out.println("Sync complete.");
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException("Could not lock the index for " + projectPath, e);
         }
     }
 }

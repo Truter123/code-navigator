@@ -81,6 +81,20 @@ class CodeNavigatorMcpServerTest {
     }
 
     @Test
+    void cgContext_missingOrBlankTaskReturnsToolText() {
+        assertThat(mcpServer.handleCgContext(Map.of())).contains("`task` is required");
+        assertThat(mcpServer.handleCgContext(Map.of("task", "  "))).contains("`task` is required");
+    }
+
+    @Test
+    void cgContext_zeroOrNegativeLimitFallsBackToTheDefault() {
+        addWidgets();
+        var byDefault = mcpServer.handleCgContext(Map.of("task", "widget"));
+        assertThat(mcpServer.handleCgContext(Map.of("task", "widget", "limit", 0))).isEqualTo(byDefault);
+        assertThat(mcpServer.handleCgContext(Map.of("task", "widget", "limit", -5))).isEqualTo(byDefault);
+    }
+
+    @Test
     void cgSearch() {
         var result = mcpServer.handleCgSearch(Map.of("query", "Order"));
         assertThat(result).contains("OrderController", "CreateOrderCommand");
@@ -1100,13 +1114,14 @@ class CodeNavigatorMcpServerTest {
 
     @Test
     void cgGuard_containsBlastRadiusAndAggregate() {
-        // Order is an AGGREGATE; depth 2 from it reaches Command, Handler, Event, Projection, View
+        // Order is an AGGREGATE; the guard counts what depends on it (the command handler that loads it)
         var result = mcpServer.handleCgGuard(Map.of("symbol", "Order", "depth", 2));
         assertThat(result).contains("## Guard");
         assertThat(result).contains("Blast radius");
-        assertThat(result).contains("OrderCreatedEvent");
+        assertThat(result).contains("CreateOrderCommandHandler");
         assertThat(result).contains("AGGREGATE");
-        assertThat(result).contains("DOMAIN_EVENT");
+        assertThat(result).contains("COMMAND_HANDLER");
+        assertThat(result).doesNotContain("OrderCreatedEvent");
     }
 
 
@@ -1327,8 +1342,21 @@ class CodeNavigatorMcpServerTest {
 
     @Test
     void cgContext_stopsAtTenFilesByDefault() {
+        // The reply no longer knows how many files lie beyond the limit (it ranks, it does not walk
+        // the whole component), so the footer says "more", not how many.
         addWidgets();
-        assertStopsAtTenByDefault(mcpServer::handleCgContext, Map.of("task", "widget"));
+        var byDefault = mcpServer.handleCgContext(Map.of("task", "widget"));
+        assertThat(listed(byDefault)).isEqualTo(10);
+        assertThat(byDefault).contains("more file(s) ranked lower").contains("Raise `limit`");
+        assertThat(byDefault).contains("10 file(s)");
+    }
+
+    @Test
+    void cgContext_limitThreeGivesAtMostThreeFileLinesAndTheHeaderCountsOnlyThose() {
+        addWidgets();
+        var reply = mcpServer.handleCgContext(Map.of("task", "widget", "limit", 3));
+        assertThat(listed(reply)).isLessThanOrEqualTo(3);
+        assertThat(reply).contains("3 file(s)").doesNotContain("whole").doesNotContain("showing");
     }
 
     @Test

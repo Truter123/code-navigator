@@ -1,10 +1,14 @@
 package com.codenavigator.search;
 
+import com.codenavigator.graph.EdgeType;
 import com.codenavigator.graph.GraphStore;
 import com.codenavigator.graph.GraphTraversal;
 import com.codenavigator.graph.Node;
+import com.codenavigator.graph.NodeType;
+import com.codenavigator.mcp.TestPaths;
 
 import java.util.*;
+import java.util.function.ToDoubleFunction;
 import java.util.stream.Collectors;
 
 public class SearchService {
@@ -13,7 +17,11 @@ public class SearchService {
         "a", "an", "the", "to", "from", "in", "on", "at", "by", "for", "with",
         "of", "and", "or", "is", "it", "that", "this", "be", "as", "are", "was",
         "add", "remove", "update", "fix", "change", "modify", "create", "delete",
-        "field", "method", "class", "file", "when", "if", "not", "all", "new"
+        "field", "method", "class", "file", "when", "if", "not", "all", "new",
+        // Question and auxiliary words carry no code meaning. get/find/make/use/work/show/need/want are
+        // left out on purpose: they are common identifier parts and may be the real target of a task.
+        "where", "what", "which", "why", "who", "whom", "whose", "how", "does", "do", "did", "were",
+        "been", "can", "could", "should", "would", "will", "happen", "happens", "happening"
     );
 
     /** A stem keeps at least this many characters, or it would match half the graph ("ord" for "order"). */
@@ -23,6 +31,8 @@ public class SearchService {
     private static final List<String> SUFFIXES = List.of(
         "ations", "ation", "ments", "ment", "ings", "ing", "ions", "ion", "ers", "er", "ies", "ied", "ed", "es", "s"
     );
+
+    static final int DEFAULT_FILE_BUDGET = 10;
 
     private final GraphStore store;
     private final GraphTraversal traversal;
@@ -77,9 +87,31 @@ public class SearchService {
      * Context search for a task description:
      * 1. Extract keywords, reduce each to its stem -> FTS5 prefix search per stem (seed set)
      * 2. Rank seeds by how many distinct keywords they match
-     * 3. Expand each seed's connected component once, return
+     * 3. Rank the whole graph by personalised PageRank from the seeds, return the best nodes of
+     *    the first {@code fileBudget} files
      */
     public List<Node> contextSearch(String taskDescription) {
+        return contextSearch(taskDescription, DEFAULT_FILE_BUDGET);
+    }
+
+    /** Distinct keyword stems of a task: the seed queries {@link #contextSearch} runs. */
+    public Set<String> keywordStems(String text) {
+        var stems = new LinkedHashSet<String>();
+        for (var keyword : extractKeywords(text)) stems.add(stem(keyword));
+        return stems;
+    }
+
+    /** True when a keyword stem of the task matches a node contextSearch can seed from (not a library or test source). */
+    public boolean hasKeywordSeed(String text) {
+        for (var stem : keywordStems(text)) {
+            for (var hit : store.searchFts(stem + "*")) {
+                if (hit.type() != NodeType.LIBRARY && !TestPaths.isUnderSrcTest(hit.filePath())) return true;
+            }
+        }
+        return false;
+    }
+
+    public List<Node> contextSearch(String taskDescription, int fileBudget) {
         var keywords = extractKeywords(taskDescription);
         if (keywords.isEmpty()) return List.of();
 
@@ -118,22 +150,88 @@ public class SearchService {
         ranked.sort(Comparator.comparingInt((Node n) -> keywordsMatched.get(n.id()))
             .thenComparingInt(n -> typedMatched.getOrDefault(n.id(), 0)).reversed());
 
-        // Seeds first, then the rest of their connected components. traceChain follows edges both
-        // ways, so every node of a component reaches the same set: a seed inside a component that
-        // was already traced adds nothing and is skipped. Tracing every hit re-walked the whole
-        // component per hit (10,615 nodes x hundreds of hits on nlp-be) and a multi-word query
-        // never returned; this walks each component at most once and keeps the old order.
-        var expanded = new LinkedHashMap<String, Node>();
-        for (var seed : ranked) expanded.put(seed.id(), seed);
-        var traced = new HashSet<String>();
-        for (var seed : ranked) {
-            if (traced.contains(seed.id())) continue;
-            for (var node : traversal.traceChain(seed.id())) {
-                traced.add(node.id());
-                expanded.putIfAbsent(node.id(), node);
-            }
+        return expand(ranked, keywordsMatched, typedMatched, fileBudget);
+    }
+
+    /**
+     * Personalised PageRank from the seeds over the whole graph, then the best nodes until
+     * {@code fileBudget} files are filled. A METHOD is merged into its declaring class for ranking
+     * (a class and its methods are one place), so a place's score is its class's. Seed methods are
+     * returned as themselves; a non-seed method never is, its class stands for it. Library nodes
+     * and test sources are left out of the walk and of the answer.
+     */
+    private List<Node> expand(List<Node> seedsInKeywordOrder, Map<String, Integer> keywordsMatched,
+                              Map<String, Integer> typedMatched, int fileBudget) {
+        var all = new ArrayList<Node>();
+        for (var node : store.getAllNodes()) {
+            if (node.type() == NodeType.LIBRARY || TestPaths.isUnderSrcTest(node.filePath())) continue;
+            all.add(node);
         }
-        return new ArrayList<>(expanded.values());
+        var seedList = new ArrayList<Node>();
+        for (var seed : seedsInKeywordOrder) {
+            if (seed.type() == NodeType.LIBRARY || TestPaths.isUnderSrcTest(seed.filePath())) continue;
+            seedList.add(seed);
+        }
+        if (seedList.isEmpty()) return List.of();
+
+        var edges = store.getAllEdges();
+        var placeOf = new HashMap<String, String>();
+        for (var edge : edges) {
+            if (edge.type() == EdgeType.DECLARES_METHOD) placeOf.put(edge.targetId(), edge.sourceId());
+        }
+        var index = new HashMap<String, Integer>();
+        for (var node : all) {
+            String place = node.type() == NodeType.METHOD ? placeOf.getOrDefault(node.id(), node.id()) : node.id();
+            index.putIfAbsent(place, index.size());
+        }
+        int n = index.size();
+        var from = new int[edges.size()];
+        var to = new int[edges.size()];
+        int m = 0;
+        for (var edge : edges) {
+            if (edge.type() == EdgeType.DECLARES_METHOD) continue;
+            Integer a = index.get(placeOf.getOrDefault(edge.sourceId(), edge.sourceId()));
+            Integer b = index.get(placeOf.getOrDefault(edge.targetId(), edge.targetId()));
+            if (a == null || b == null) continue;
+            from[m] = a;
+            to[m++] = b;
+        }
+        var personalisation = new double[n];
+        for (var seed : seedList) {
+            Integer place = index.get(placeOf.getOrDefault(seed.id(), seed.id()));
+            if (place != null) personalisation[place] += keywordsMatched.get(seed.id());
+        }
+        var scores = PersonalizedPageRank.rank(n, Arrays.copyOf(from, m), Arrays.copyOf(to, m), personalisation);
+        ToDoubleFunction<Node> score = node -> {
+            Integer place = index.get(placeOf.getOrDefault(node.id(), node.id()));
+            return place == null ? 0 : scores[place];
+        };
+
+        // Seeds keep their keyword order; PageRank breaks ties. A non-seed never outranks a seed.
+        var ordered = new ArrayList<Node>(seedList);
+        ordered.sort(Comparator.comparingInt((Node x) -> keywordsMatched.get(x.id()))
+            .thenComparingInt(x -> typedMatched.getOrDefault(x.id(), 0))
+            .thenComparingDouble(score).reversed());
+        var seedIds = new HashSet<String>();
+        for (var seed : seedList) seedIds.add(seed.id());
+        var rest = new ArrayList<Node>();
+        for (var node : all) {
+            if (node.type() != NodeType.METHOD && !seedIds.contains(node.id()) && score.applyAsDouble(node) > 0) rest.add(node);
+        }
+        rest.sort(Comparator.comparingDouble(score).reversed());
+        ordered.addAll(rest);
+
+        // Fill files in rank order; a node of a file already taken adds no file, so it comes along.
+        var files = new HashSet<String>();
+        var result = new ArrayList<Node>();
+        for (var node : ordered) {
+            if (!files.contains(node.filePath())) {
+                if (files.size() >= fileBudget) continue;
+                files.add(node.filePath());
+            }
+            result.add(node);
+        }
+        return result;
     }
 
     /**
@@ -145,7 +243,7 @@ public class SearchService {
      * leaves behind is undoubled ({@code cancell} becomes {@code cancel}), but only then: "install"
      * keeps both l.
      */
-    static String stem(String word) {
+    public static String stem(String word) {
         for (String suffix : SUFFIXES) {
             if (!word.endsWith(suffix)) continue;
             // "class", "status" and "analysis" end in s without being plurals.

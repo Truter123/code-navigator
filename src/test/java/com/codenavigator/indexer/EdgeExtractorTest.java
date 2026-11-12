@@ -371,4 +371,86 @@ class EdgeExtractorTest {
             && e.sourceId().equals("com.sample.OrderService")
             && e.targetId().equals("com.sample.OrderView"));
     }
+
+    // ── Precedence: single-type import over same package (JLS 6.4.1) ──
+
+    private List<Edge> extractFooCase(String imports, String declaration) {
+        saveNode(node("a.Foo", NodeType.SERVICE));
+        saveNode(node("b.Foo", NodeType.SERVICE));
+        var source = node("a.Caller", NodeType.SERVICE);
+        saveNode(source);
+        return extract(Project.GENERIC, "package a; " + imports + declaration, source);
+    }
+
+    private static final String INJECTS_FOO =
+        "public class Caller { private Foo foo; public Caller(Foo foo) { this.foo = foo; } }";
+    private static final String EXTENDS_FOO = "public class Caller extends Foo {}";
+
+    private void assertTarget(List<Edge> edges, EdgeType type, String target) {
+        assertThat(edges).filteredOn(e -> e.type() == type).extracting(Edge::targetId)
+            .containsExactly(target);
+    }
+
+    @Test
+    void injectsFollowsAnExplicitImportOverTheSamePackage() {
+        assertTarget(extractFooCase("import b.Foo;", INJECTS_FOO), EdgeType.INJECTS, "b.Foo");
+    }
+
+    @Test
+    void injectsWithoutImportBindsTheSamePackageType() {
+        assertTarget(extractFooCase("", INJECTS_FOO), EdgeType.INJECTS, "a.Foo");
+    }
+
+    @Test
+    void injectsOfAnImportedLibraryTypeIsNotBoundToTheSamePackageType() {
+        var edges = extractFooCase("import lib.Foo;", INJECTS_FOO);
+        assertThat(edges).filteredOn(e -> e.type() == EdgeType.INJECTS).isEmpty();
+    }
+
+    @Test
+    void extendsFollowsAnExplicitImportOverTheSamePackage() {
+        assertTarget(extractFooCase("import b.Foo;", EXTENDS_FOO), EdgeType.EXTENDS, "b.Foo");
+    }
+
+    @Test
+    void extendsWithoutImportBindsTheSamePackageType() {
+        assertTarget(extractFooCase("", EXTENDS_FOO), EdgeType.EXTENDS, "a.Foo");
+    }
+
+    @Test
+    void extendsOfAnImportedLibraryTypeIsNotBoundToTheSamePackageType() {
+        var edges = extractFooCase("import lib.Foo;", EXTENDS_FOO);
+        assertThat(edges).filteredOn(e -> e.type() == EdgeType.EXTENDS).isEmpty();
+    }
+
+    @Test
+    void injectsAndExtendsANestedTypeWrittenWithItsOuter() {
+        saveNode(node("p.A", NodeType.SERVICE));
+        saveNode(node("p.A.Chain", NodeType.SERVICE));
+        saveNode(node("p.B.Chain", NodeType.SERVICE));
+        var source = node("p.C", NodeType.SERVICE);
+        saveNode(source);
+
+        var edges = extract(Project.GENERIC,
+            "package p; class C extends A.Chain { C(A.Chain chain) {} }", source);
+
+        assertThat(edges).extracting(Edge::type, Edge::targetId).contains(
+            org.assertj.core.groups.Tuple.tuple(EdgeType.INJECTS, "p.A.Chain"),
+            org.assertj.core.groups.Tuple.tuple(EdgeType.EXTENDS, "p.A.Chain"));
+    }
+
+    @Test
+    void injectsAndExtendsANestedTypeThroughAnImportFromAnotherPackage() {
+        saveNode(node("p.A.Chain", NodeType.SERVICE));
+        saveNode(node("p.B.Chain", NodeType.SERVICE));
+        var source = node("q.Q", NodeType.SERVICE);
+        saveNode(source);
+
+        var edges = extract(Project.GENERIC,
+            "package q; import p.B.Chain; class Q extends Chain { Q(Chain chain) {} }", source);
+
+        assertThat(edges).extracting(Edge::type, Edge::targetId).contains(
+            org.assertj.core.groups.Tuple.tuple(EdgeType.INJECTS, "p.B.Chain"),
+            org.assertj.core.groups.Tuple.tuple(EdgeType.EXTENDS, "p.B.Chain"));
+    }
 }

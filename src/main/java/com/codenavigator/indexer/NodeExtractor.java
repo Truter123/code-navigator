@@ -28,25 +28,54 @@ public class NodeExtractor {
 
         cu.findAll(ClassOrInterfaceDeclaration.class).forEach(decl -> {
             var name = decl.getNameAsString();
-            var qualifiedName = packageName.isEmpty() ? name : packageName + "." + name;
+            var qualifiedName = JavaTypeResolver.typeId(packageName, decl);
             var type = classifyClassOrInterface(decl);
             nodes.add(buildNode(qualifiedName, type, name, filePath, decl));
         });
 
         cu.findAll(RecordDeclaration.class).forEach(decl -> {
             var name = decl.getNameAsString();
-            var qualifiedName = packageName.isEmpty() ? name : packageName + "." + name;
+            var qualifiedName = JavaTypeResolver.typeId(packageName, decl);
             var type = classifyRecord(decl);
             nodes.add(buildNode(qualifiedName, type, name, filePath, decl));
         });
 
         cu.findAll(EnumDeclaration.class).forEach(decl -> {
             var name = decl.getNameAsString();
-            var qualifiedName = packageName.isEmpty() ? name : packageName + "." + name;
+            var qualifiedName = JavaTypeResolver.typeId(packageName, decl);
             nodes.add(buildNode(qualifiedName, NodeType.ENUM, name, filePath, decl));
         });
 
         return nodes;
+    }
+
+    /** Ids of types started from outside the code: a static {@code main(String[])}, or a picocli {@code @Command}. */
+    public java.util.Set<String> entryPointIds(CompilationUnit cu) {
+        var ids = new java.util.HashSet<String>();
+        var packageName = cu.getPackageDeclaration().map(pd -> pd.getNameAsString()).orElse("");
+        boolean commandImported = cu.getImports().stream().anyMatch(i -> {
+            var n = i.getNameAsString();
+            return n.equals("picocli.CommandLine.Command")
+                || (i.isAsterisk() && (n.equals("picocli.CommandLine") || n.equals("picocli")));
+        });
+        boolean commandLineImported = cu.getImports().stream().anyMatch(i ->
+            !i.isStatic() && !i.isAsterisk() && i.getNameAsString().equals("picocli.CommandLine"));
+        cu.findAll(TypeDeclaration.class).forEach(t -> {
+            var decl = (TypeDeclaration<?>) t;
+            boolean main = decl.getMethods().stream().anyMatch(m ->
+                m.getNameAsString().equals("main") && m.isStatic() && m.getParameters().size() == 1
+                && m.getParameter(0).getType().asString().replace(" ", "").matches("String(\\[\\]|\\.\\.\\.)"));
+            boolean command = decl.getAnnotations().stream().anyMatch(a -> {
+                var n = a.getNameAsString();
+                return (n.equals("Command") && commandImported)
+                    || (n.equals("CommandLine.Command") && commandLineImported)
+                    || n.equals("picocli.CommandLine.Command");
+            });
+            if (main || command) {
+                ids.add(JavaTypeResolver.typeId(packageName, decl));
+            }
+        });
+        return ids;
     }
 
     private NodeType classifyClassOrInterface(ClassOrInterfaceDeclaration decl) {

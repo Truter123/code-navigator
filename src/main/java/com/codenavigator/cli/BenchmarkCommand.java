@@ -7,6 +7,7 @@ import com.codenavigator.benchmark.TokenEstimator;
 import com.codenavigator.graph.GraphStore;
 import com.codenavigator.graph.GraphTraversal;
 import picocli.CommandLine.Command;
+import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
 
 import java.io.IOException;
@@ -41,6 +42,10 @@ public class BenchmarkCommand implements Runnable {
     @Parameters(index = "0", description = "Path to the project root (must already be indexed)")
     private Path projectPath;
 
+    @Option(names = "--query", description = "Task used by the semantic-context scenario",
+        defaultValue = "where does request validation happen")
+    private String query;
+
     @Override
     public void run() {
         if (!ProjectPaths.hasIndex(projectPath)) {
@@ -63,10 +68,15 @@ public class BenchmarkCommand implements Runnable {
             List<BenchmarkRow> rows = new java.util.ArrayList<>(runner.run());
 
             var search = new com.codenavigator.search.SearchService(store, traversal);
-            rows.add(runner.runSemanticContext(search, "where does request validation happen"));
+            rows.add(runner.runSemanticContext(search, query));
 
             String table = new MarkdownTableRenderer().render(rows);
             System.out.println(table);
+            String symbolNote = runner.lastSymbolImpactNote();
+            String note = runner.lastSemanticNote();
+            if (!symbolNote.isEmpty() || !note.isEmpty()) System.out.println();
+            if (!symbolNote.isEmpty()) System.out.println(symbolNote);
+            if (!note.isEmpty()) System.out.println(note);
         } catch (Exception e) {
             System.err.println("Benchmark failed: " + e.getMessage());
         } finally {

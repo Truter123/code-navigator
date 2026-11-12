@@ -63,8 +63,9 @@ class GuardReportBuilderTest {
         var report = builder.build("com.Order", 2);
         assertThat(report).contains("## Guard");
         assertThat(report).contains("Blast radius");
-        // DDD-significant neighbours are named in full.
-        assertThat(report).contains("OrderCreatedEvent");
+        // DDD-significant dependents are named in full: the handler that loads Order. What Order
+        // emits is not a dependent of it.
+        assertThat(report).doesNotContain("OrderCreatedEvent");
         assertThat(report).contains("CreateOrderCommandHandler");
     }
 
@@ -111,39 +112,45 @@ class GuardReportBuilderTest {
         var builder = new GuardReportBuilder(graphStore, traversal);
         var report = builder.build("com.Order", 2);
 
-        var pointer = Pattern.compile("More: (cg_\\w+)\\(symbol, depth (\\d+), limit (\\d+)\\)").matcher(report);
+        var pointer = Pattern.compile("More: (cg_\\w+)\\(symbol, direction in, depth (\\d+), limit (\\d+)\\)").matcher(report);
         assertThat(pointer.find()).as(report).isTrue();
         assertThat(pointer.group(1)).isEqualTo("cg_related");
 
         // Run the pointer as printed: the count the guard gave is the limit that shows every row.
         var server = new CodeNavigatorMcpServer(graphStore, traversal, new SearchService(graphStore, traversal));
-        var listing = server.handleCgRelated(Map.of("symbol", "com.Order",
+        var listing = server.handleCgRelated(Map.of("symbol", "com.Order", "direction", "in",
             "depth", Integer.parseInt(pointer.group(2)), "limit", Integer.parseInt(pointer.group(3))));
 
-        assertThat(listing).contains(pointer.group(3) + " affected node(s)")
-            .contains("OrderCreatedEvent", "CreateOrderCommandHandler", "OrderViewProjectionHandler")
+        assertThat(listing).contains(pointer.group(3) + " incoming found")
+            .contains("CreateOrderCommandHandler")
+            .doesNotContain("OrderCreatedEvent", "OrderViewProjectionHandler")
             .doesNotContain("more.");
     }
 
     @Test
     void build_theMorePointerCountsTheRowsItsCallReturnsNotTheMethodsItLeavesOut() {
-        // Three methods in range. cg_related lists a class's blast radius as types, so the limit the
+        // Three calling methods in range. cg_related lists a class's dependents as types, so the limit the
         // guard prints is the number of those rows, not the node count it states above.
+        graphStore.saveNode(new Node("com.Svc", NodeType.SERVICE, "Svc", "com.Svc", "Svc.java", 1, "class Svc", 0));
         for (String m : new String[] {"a", "b", "c"}) {
             String id = "com.Order#" + m + "()";
+            String caller = "com.Svc#" + m + "()";
             graphStore.saveNode(new Node(id, NodeType.METHOD, m, id, "Order.java", 1, "void " + m + "()", 0));
+            graphStore.saveNode(new Node(caller, NodeType.METHOD, m, caller, "Svc.java", 1, "void " + m + "()", 0));
             graphStore.saveEdge(new Edge("d" + m, EdgeType.DECLARES_METHOD, "com.Order", id));
+            graphStore.saveEdge(new Edge("s" + m, EdgeType.DECLARES_METHOD, "com.Svc", caller));
+            graphStore.saveEdge(new Edge("c" + m, EdgeType.CALLS, caller, id));
         }
         var report = new GuardReportBuilder(graphStore, traversal).build("com.Order", 2);
 
-        var pointer = Pattern.compile("(cg_\\w+)\\(symbol, depth (\\d+), limit (\\d+)\\)").matcher(report);
+        var pointer = Pattern.compile("(cg_\\w+)\\(symbol, direction in, depth (\\d+), limit (\\d+)\\)").matcher(report);
         assertThat(pointer.find()).as(report).isTrue();
         int promised = Integer.parseInt(pointer.group(3));
         var server = new CodeNavigatorMcpServer(graphStore, traversal, new SearchService(graphStore, traversal));
-        var listing = server.handleCgRelated(Map.of("symbol", "com.Order",
+        var listing = server.handleCgRelated(Map.of("symbol", "com.Order", "direction", "in",
             "depth", Integer.parseInt(pointer.group(2)), "limit", promised));
 
-        assertThat(listing).contains(promised + " affected node(s)").doesNotContain("more.");
+        assertThat(listing).contains(promised + " incoming found").doesNotContain("more.");
         assertThat(report).contains("Blast radius (depth 2): " + (promised + 3) + " node(s)")
             .contains("methods left out");
     }
@@ -153,37 +160,44 @@ class GuardReportBuilderTest {
         graphStore.saveNode(new Node("com.Lonely", NodeType.CLASS, "Lonely", "com.Lonely", "Lonely.java", 1, "class Lonely", 0));
         for (String m : new String[] {"x", "y"}) {
             String id = "com.Lonely#" + m + "()";
+            String caller = "com.Other#" + m + "()";
             graphStore.saveNode(new Node(id, NodeType.METHOD, m, id, "Lonely.java", 2, "void " + m + "()", 0));
+            // Callers with no class node of their own: only methods are in range.
+            graphStore.saveNode(new Node(caller, NodeType.METHOD, m, caller, "Other.java", 2, "void " + m + "()", 0));
             graphStore.saveEdge(new Edge("l" + m, EdgeType.DECLARES_METHOD, "com.Lonely", id));
+            graphStore.saveEdge(new Edge("o" + m, EdgeType.CALLS, caller, id));
         }
         var report = new GuardReportBuilder(graphStore, traversal).build("com.Lonely", 1);
 
-        var pointer = Pattern.compile("(cg_\\w+)\\(symbol, depth (\\d+), granularity all, limit (\\d+)\\)").matcher(report);
+        var pointer = Pattern.compile("(cg_\\w+)\\(symbol, direction in, depth (\\d+), granularity all, limit (\\d+)\\)").matcher(report);
         assertThat(pointer.find()).as(report).isTrue();
         var server = new CodeNavigatorMcpServer(graphStore, traversal, new SearchService(graphStore, traversal));
-        var listing = server.handleCgRelated(Map.of("symbol", "com.Lonely", "depth", 1,
+        var listing = server.handleCgRelated(Map.of("symbol", "com.Lonely", "direction", "in", "depth", 1,
             "granularity", "all", "limit", Integer.parseInt(pointer.group(3))));
 
-        assertThat(listing).contains(pointer.group(3) + " affected node(s)");
+        assertThat(listing).contains(pointer.group(3) + " incoming found");
     }
 
     @Test
     void build_listsDddSignificantNodesAsRowsUnderTheirDirectory() {
         graphStore.saveNode(new Node("com.sales.Shipped", NodeType.DOMAIN_EVENT, "Shipped",
             "com.sales.Shipped", "src/main/java/com/sales/Shipped.java", 3, "class Shipped", 0));
-        graphStore.saveEdge(new Edge("s1", EdgeType.EMITS_EVENT, "com.Order", "com.sales.Shipped"));
+        graphStore.saveNode(new Node("com.sales.ShipHandler", NodeType.COMMAND_HANDLER, "ShipHandler",
+            "com.sales.ShipHandler", "src/main/java/com/sales/ShipHandler.java", 3, "class ShipHandler", 0));
+        graphStore.saveEdge(new Edge("s1", EdgeType.LOADS_AGGREGATE, "com.sales.ShipHandler", "com.Order"));
 
         var builder = new GuardReportBuilder(graphStore, traversal);
         var report = builder.build("com.Order", 2);
 
-        assertThat(report).contains("src/main/java/com/sales/\n  Shipped.java:3 Shipped DOMAIN_EVENT\n");
-        assertThat(report).doesNotContain("**").doesNotContain("`Shipped`");
+        assertThat(report).contains("src/main/java/com/sales/\n  ShipHandler.java:3 ShipHandler COMMAND_HANDLER\n");
+        assertThat(report).doesNotContain("**").doesNotContain("`ShipHandler`");
     }
 
     @Test
     void build_callsOutDddHighlightTypes() {
         var builder = new GuardReportBuilder(graphStore, traversal);
-        var report = builder.build("com.Order", 2);
+        // The event's dependents: the aggregate that emits it, the projection handler, and the handler loading the aggregate.
+        var report = builder.build("com.OrderCreatedEvent", 2);
         // DDD-significant types must be called out with a warning marker
         assertThat(report).contains("AGGREGATE");
         assertThat(report).contains("DOMAIN_EVENT");

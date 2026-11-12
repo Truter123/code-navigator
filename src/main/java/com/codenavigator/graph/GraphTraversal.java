@@ -4,17 +4,6 @@ import java.util.*;
 
 public class GraphTraversal {
 
-    private static final Set<EdgeType> CALL_EDGE_TYPES = Set.of(
-        EdgeType.CALLS_METHOD, EdgeType.INJECTS, EdgeType.CALLS_API, EdgeType.USES_SERVICE,
-        EdgeType.DISPATCHES_COMMAND, EdgeType.DISPATCHES_QUERY, EdgeType.USES_LIBRARY,
-        EdgeType.CALLS, EdgeType.DECLARES_METHOD, EdgeType.OVERRIDES,
-        // Extra-language seam (Python, shell, SQL): a non-method node's incoming/outgoing
-        // connections still answer "who/what connects to X" — a SQL_TABLE's REFERENCES_TABLE
-        // callers, a SHELL_SCRIPT's SOURCES/RUNS neighbours, a PY_MODULE's IMPORTS.
-        EdgeType.REFERENCES_TABLE, EdgeType.DERIVES_FROM, EdgeType.REFERENCES_FK,
-        EdgeType.SOURCES, EdgeType.RUNS, EdgeType.IMPORTS
-    );
-
     /**
      * A class and the methods it declares are the same place, so crossing DECLARES_METHOD costs no
      * depth. Without this, {@code depth 2} from a class would spend one hop reaching its own
@@ -23,15 +12,6 @@ public class GraphTraversal {
      */
     private static boolean isFreeHop(EdgeType type) {
         return type == EdgeType.DECLARES_METHOD;
-    }
-
-    /**
-     * Whether {@link #callers} and {@link #callees} follow this edge type. The others (RETURNS_TYPE,
-     * EMITS_EVENT, EXTENDS, ...) only appear in the undirected {@link #impact} walk, so a pointer
-     * that lists them has to ask for that one.
-     */
-    public static boolean followedDirectionally(EdgeType type) {
-        return CALL_EDGE_TYPES.contains(type);
     }
 
     private final GraphStore store;
@@ -74,8 +54,8 @@ public class GraphTraversal {
 
     /**
      * Find all nodes that call the given node (directly or transitively), following
-     * only call-type edges (CALLS_METHOD, INJECTS, CALLS_API, USES_SERVICE) in the
-     * incoming direction.
+     * every edge type in the incoming direction: for an incoming edge the source depends on the target
+     * (calls, EXTENDS, IMPLEMENTS, HANDLES, APPLIES_EVENT, PROJECTS_EVENT, ...).
      */
     public List<Node> callers(String nodeId, int maxDepth) {
         return traverseDirectional(nodeId, maxDepth, true);
@@ -83,8 +63,7 @@ public class GraphTraversal {
 
     /**
      * Find all nodes that the given node calls (directly or transitively), following
-     * only call-type edges (CALLS_METHOD, INJECTS, CALLS_API, USES_SERVICE) in the
-     * outgoing direction.
+     * every edge type in the outgoing direction (what the node depends on).
      */
     public List<Node> callees(String nodeId, int maxDepth) {
         return traverseDirectional(nodeId, maxDepth, false);
@@ -92,7 +71,7 @@ public class GraphTraversal {
 
     private List<Node> traverseDirectional(String startId, int maxDepth, boolean incoming) {
         return search(startId, maxDepth, incoming ? Direction.INCOMING : Direction.OUTGOING,
-            CALL_EDGE_TYPES);
+            null, false);
     }
 
     private enum Direction { INCOMING, OUTGOING, BOTH }
@@ -105,7 +84,7 @@ public class GraphTraversal {
      * @param allowedTypes edge types to follow, or null to follow every edge
      */
     private List<Node> search(String startId, int maxDepth, Direction direction,
-                              Set<EdgeType> allowedTypes) {
+                              Set<EdgeType> allowedTypes, boolean libraryLeaf) {
         List<Node> result = new ArrayList<>();
         Set<String> emitted = new HashSet<>();
         Map<String, Integer> depth = new LinkedHashMap<>();
@@ -126,6 +105,10 @@ public class GraphTraversal {
             String currentId = deque.pollFirst();
             int currentDepth = depth.get(currentId);
             if (direction != Direction.BOTH && contextOnly.contains(currentId)) continue;
+            // A library is shared by every type that imports it: walking on through it reaches
+            // unrelated types, so it is shown but expands nothing.
+            if (libraryLeaf && !currentId.equals(startId)
+                && store.findNodeById(currentId).map(n -> n.type() == NodeType.LIBRARY).orElse(false)) continue;
 
             // Both directions are gathered every time; a free hop is containment rather than a
             // call, so it is crossed whichever way it points even on a directional query. Reaching
@@ -187,6 +170,11 @@ public class GraphTraversal {
      * Excludes the start node itself.
      */
     public List<Node> impact(String nodeId, int depth) {
-        return search(nodeId, depth, Direction.BOTH, null);
+        return search(nodeId, depth, Direction.BOTH, null, false);
+    }
+
+    /** Like {@link #impact}, but a LIBRARY node is a leaf: it is listed and the walk does not continue through it. */
+    public List<Node> related(String nodeId, int depth) {
+        return search(nodeId, depth, Direction.BOTH, null, true);
     }
 }

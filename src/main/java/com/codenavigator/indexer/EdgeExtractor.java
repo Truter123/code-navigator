@@ -40,6 +40,17 @@ public class EdgeExtractor {
     private final GraphStore store;
     private final List<Dependency> dependencies;
     private final Set<String> sqlTables;
+    private JavaTypeResolver resolver;
+    private JavaTypeResolver.FileContext currentCtx;
+    /** Id of the type whose edges are being extracted: where a written type name is looked up first. */
+    private String currentSourceId;
+    private java.nio.file.Path sourceRoot;
+
+    /** Lets the resolver read the supertypes declared in files other than the one being extracted. */
+    public EdgeExtractor withSourceRoot(java.nio.file.Path root) {
+        this.sourceRoot = root;
+        return this;
+    }
 
     /** Backward-compatible constructor: no library dependency awareness. */
     public EdgeExtractor(Project tier, GraphStore store) {
@@ -69,10 +80,12 @@ public class EdgeExtractor {
         var packageName = cu.getPackageDeclaration()
                 .map(pd -> pd.getNameAsString())
                 .orElse("");
+        this.currentCtx = JavaTypeResolver.FileContext.of(cu);
+        this.currentSourceId = sourceNode.id();
 
         cu.findAll(ClassOrInterfaceDeclaration.class).forEach(decl -> {
             var declName = decl.getNameAsString();
-            var qualifiedName = packageName.isEmpty() ? declName : packageName + "." + declName;
+            var qualifiedName = JavaTypeResolver.typeId(packageName, decl);
             if (!qualifiedName.equals(sourceNode.qualifiedName())) return;
 
             // Project 1: always active
@@ -104,24 +117,24 @@ public class EdgeExtractor {
 
         cu.findAll(RecordDeclaration.class).forEach(decl -> {
             var declName = decl.getNameAsString();
-            var qualifiedName = packageName.isEmpty() ? declName : packageName + "." + declName;
+            var qualifiedName = JavaTypeResolver.typeId(packageName, decl);
             if (!qualifiedName.equals(sourceNode.qualifiedName())) return;
             extractReferencesTable(decl, sourceNode, edges);
         });
 
         cu.findAll(EnumDeclaration.class).forEach(decl -> {
             var declName = decl.getNameAsString();
-            var qualifiedName = packageName.isEmpty() ? declName : packageName + "." + declName;
+            var qualifiedName = JavaTypeResolver.typeId(packageName, decl);
             if (!qualifiedName.equals(sourceNode.qualifiedName())) return;
             extractReferencesTable(decl, sourceNode, edges);
         });
 
         // Library boundary detection (all tiers, only when dependencies are supplied)
-        if (!dependencies.isEmpty()) {
+        if (!dependencies.isEmpty() && declaresType(cu, packageName, sourceNode)) {
             extractUsesLibrary(cu, sourceNode, edges);
         }
 
-        return edges;
+        return distinct(edges);
     }
 
     // ── Table references (Java entities/queries -> SQL tables) ──
@@ -210,20 +223,41 @@ public class EdgeExtractor {
 
     // ── Library boundary ──
 
+    /** Only a type declared in this file imports anything; a METHOD node of it does not. */
+    private static boolean declaresType(CompilationUnit cu, String packageName, Node source) {
+        return cu.findAll(com.github.javaparser.ast.body.TypeDeclaration.class).stream().anyMatch(t -> {
+            return JavaTypeResolver.typeId(packageName, t).equals(source.qualifiedName());
+        });
+    }
+
+    /**
+     * One (type, source, target) triple once: a second copy carries no meaning, and edge ids are
+     * random, so without this the same INJECTS edge was stored once per constructor parameter.
+     */
+    private static List<Edge> distinct(List<Edge> edges) {
+        var seen = new java.util.LinkedHashMap<String, Edge>();
+        for (Edge e : edges) seen.putIfAbsent(e.type() + "|" + e.sourceId() + "|" + e.targetId(), e);
+        return new ArrayList<>(seen.values());
+    }
+
+    private final java.util.Set<String> libraryEdgesSeen = new java.util.HashSet<>();
+
     private void extractUsesLibrary(CompilationUnit cu, Node source, List<Edge> edges) {
         cu.getImports().forEach(importDecl -> {
             if (importDecl.isAsterisk()) return;
             String importFqn = importDecl.getNameAsString();
 
             // Skip if this type is already an internal node
-            if (store.findNodeById(importFqn).isPresent()) return;
+            // A LIBRARY node minted earlier in this pass (or left by a previous run) is not an
+            // internal type: counting it made the first run and the second run differ.
+            if (store.findNodeById(importFqn).filter(n -> n.type() != NodeType.LIBRARY).isPresent()) return;
             var simpleParts = importFqn.split("\\.");
             var simpleName = simpleParts[simpleParts.length - 1];
-            if (!store.findNodesByName(simpleName).isEmpty()) return;
+            if (store.findNodesByName(simpleName).stream().anyMatch(n -> n.type() != NodeType.LIBRARY)) return;
 
             // Find matching declared dependency
             dependencies.stream()
-                .filter(dep -> importFqn.startsWith(dep.packagePrefix()))
+                .filter(dep -> dep.owns(importFqn))
                 .findFirst()
                 .ifPresent(dep -> mintLibraryNode(importFqn, dep, source, edges));
         });
@@ -249,6 +283,7 @@ public class EdgeExtractor {
         // Persist the edge directly (extract() is also called standalone, e.g. in unit
         // tests, where the caller does not save the returned list) and add it to the
         // returned list for the indexing pipeline.
+        if (!libraryEdgesSeen.add(source.id() + "|" + importFqn)) return;
         var edge = new Edge(java.util.UUID.randomUUID().toString(),
             EdgeType.USES_LIBRARY, source.id(), importFqn);
         store.saveEdge(edge);
@@ -271,8 +306,7 @@ public class EdgeExtractor {
     private void extractImplements(ClassOrInterfaceDeclaration decl, Node source,
                                    String packageName, List<Edge> edges) {
         decl.getImplementedTypes().forEach(impl -> {
-            var name = impl.getNameAsString();
-            resolveNode(name, packageName).ifPresent(target ->
+            resolveNode(impl.getNameWithScope(), packageName).ifPresent(target ->
                 edges.add(edge(EdgeType.IMPLEMENTS, source, target)));
         });
     }
@@ -283,7 +317,7 @@ public class EdgeExtractor {
             var name = ext.getNameAsString();
             // Skip framework base classes
             if (isFrameworkClass(name)) return;
-            resolveNode(name, packageName).ifPresent(target ->
+            resolveNode(ext.getNameWithScope(), packageName).ifPresent(target ->
                 edges.add(edge(EdgeType.EXTENDS, source, target)));
         });
     }
@@ -313,6 +347,11 @@ public class EdgeExtractor {
             if (fieldName == null) return;
 
             var typeName = fieldTypes.get(fieldName);
+            // Not a field: an upper-case receiver is a static call on a class (DirectoryRows.append(...)).
+            if (typeName == null && scope instanceof NameExpr && Character.isUpperCase(fieldName.charAt(0))
+                    && !declaredLocally(mc, fieldName)) {
+                typeName = fieldName;
+            }
             if (typeName == null) return;
 
             resolveNode(typeName, packageName).ifPresent(target -> {
@@ -321,6 +360,24 @@ public class EdgeExtractor {
                 }
             });
         });
+
+        // `new X(...)` is a use of X even when X is not a field or constructor parameter.
+        decl.findAll(ObjectCreationExpr.class).forEach(oce ->
+            resolveNode(oce.getType().getNameWithScope(), packageName).ifPresent(target -> {
+                if (!target.id().equals(source.id()) && seen.add(target.id())) {
+                    edges.add(edge(EdgeType.CALLS_METHOD, source, target));
+                }
+            }));
+    }
+
+    /** True when {@code name} is a parameter or local variable of the method enclosing {@code mc}. */
+    private static boolean declaredLocally(MethodCallExpr mc, String name) {
+        return mc.findAncestor(com.github.javaparser.ast.body.CallableDeclaration.class).map(c -> {
+            var callable = (com.github.javaparser.ast.body.CallableDeclaration<?>) c;
+            return callable.getParameters().stream().anyMatch(p -> p.getNameAsString().equals(name))
+                || callable.findAll(com.github.javaparser.ast.body.VariableDeclarator.class).stream()
+                    .anyMatch(v -> v.getNameAsString().equals(name));
+        }).orElse(false);
     }
 
     private void extractReturnsType(ClassOrInterfaceDeclaration decl, Node source,
@@ -331,7 +388,7 @@ public class EdgeExtractor {
             if (returnType.isVoidType() || returnType.isPrimitiveType()) return;
             var typeName = returnType.asString();
             if (returnType.isClassOrInterfaceType()) {
-                typeName = returnType.asClassOrInterfaceType().getNameAsString();
+                typeName = returnType.asClassOrInterfaceType().getNameWithScope();
             }
             resolveNode(typeName, packageName).ifPresent(target -> {
                 if (!target.id().equals(source.id()) && seen.add(target.id())) {
@@ -414,7 +471,7 @@ public class EdgeExtractor {
                 .filter(mc -> mc.getScope().map(s -> s.toString().contains("commandBus")).orElse(false))
                 .forEach(mc -> mc.getArguments().forEach(arg ->
                     arg.findFirst(ObjectCreationExpr.class).ifPresent(oce -> {
-                        var typeName = oce.getType().getNameAsString();
+                        var typeName = oce.getType().getNameWithScope();
                         resolveNode(typeName, packageName).ifPresent(target ->
                             edges.add(edge(EdgeType.DISPATCHES_COMMAND, source, target)));
                     })
@@ -428,7 +485,7 @@ public class EdgeExtractor {
                 .filter(mc -> mc.getScope().map(s -> s.toString().contains("queryBus")).orElse(false))
                 .forEach(mc -> mc.getArguments().forEach(arg ->
                     arg.findFirst(ObjectCreationExpr.class).ifPresent(oce -> {
-                        var typeName = oce.getType().getNameAsString();
+                        var typeName = oce.getType().getNameWithScope();
                         resolveNode(typeName, packageName).ifPresent(target ->
                             edges.add(edge(EdgeType.DISPATCHES_QUERY, source, target)));
                     })
@@ -444,7 +501,7 @@ public class EdgeExtractor {
                 if (typeArgs.isPresent() && !typeArgs.get().isEmpty()) {
                     var firstArg = typeArgs.get().get(0);
                     if (firstArg instanceof ClassOrInterfaceType cit) {
-                        resolveNode(cit.getNameAsString(), packageName).ifPresent(target ->
+                        resolveNode(cit.getNameWithScope(), packageName).ifPresent(target ->
                             edges.add(edge(EdgeType.HANDLES, source, target)));
                     }
                 }
@@ -465,7 +522,9 @@ public class EdgeExtractor {
                     store.getAllNodes().stream()
                             .filter(n -> n.type() == NodeType.AGGREGATE)
                             .filter(n -> scopeName.toLowerCase().contains(n.name().toLowerCase()))
-                            .findFirst()
+                            // Order Order/SalesOrder clashes by id, never by row: a node replaced
+                            // in place moves to the end of the table and must not change the pick.
+                            .min(java.util.Comparator.comparing(Node::id))
                             .ifPresent(target ->
                                 edges.add(edge(EdgeType.LOADS_AGGREGATE, source, target)));
                 }));
@@ -477,7 +536,7 @@ public class EdgeExtractor {
                 .filter(mc -> mc.getNameAsString().equals("applyEvent"))
                 .forEach(mc -> mc.getArguments().forEach(arg ->
                     arg.findFirst(ObjectCreationExpr.class).ifPresent(oce -> {
-                        var typeName = oce.getType().getNameAsString();
+                        var typeName = oce.getType().getNameWithScope();
                         resolveNode(typeName, packageName).ifPresent(target ->
                             edges.add(edge(EdgeType.EMITS_EVENT, source, target)));
                     })
@@ -526,22 +585,15 @@ public class EdgeExtractor {
 
     // ── Node resolution ──
 
+    /** Resolves through the shared {@link JavaTypeResolver} against the current file's imports. */
     private Optional<Node> resolveNode(String simpleName, String packageName) {
-        // 1. Try same package
-        if (!packageName.isEmpty()) {
-            var fqn = packageName + "." + simpleName;
-            var found = store.findNodeById(fqn);
-            if (found.isPresent()) return found;
-        }
+        return resolver().resolve(simpleName, currentCtx, currentSourceId).flatMap(store::findNodeById);
+    }
 
-        // 2. Search all nodes by simple name
-        var matches = store.findNodesByName(simpleName);
-        if (matches.size() == 1) {
-            return Optional.of(matches.get(0));
-        }
-
-        // 3. If 0 or 2+ matches, skip
-        return Optional.empty();
+    /** Built on first use, once per extractor: the nodes are all stored before the edge pass starts. */
+    private JavaTypeResolver resolver() {
+        if (resolver == null) resolver = new JavaTypeResolver(store.getAllNodes()).withSourceRoot(sourceRoot);
+        return resolver;
     }
 
     private Edge edge(EdgeType type, Node source, Node target) {

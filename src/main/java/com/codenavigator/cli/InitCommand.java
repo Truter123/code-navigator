@@ -18,7 +18,8 @@ public class InitCommand implements Runnable {
         dbPath.getParent().toFile().mkdirs();
 
         System.out.println("Indexing project: " + projectPath);
-        try (var store = new GraphStore(dbPath)) {
+        try (var lock = IndexLock.acquire(projectPath);
+             var store = new GraphStore(dbPath)) {
             var indexer = new ProjectIndexer(store);
             indexer.indexFull(projectPath);
 
@@ -26,6 +27,8 @@ public class InitCommand implements Runnable {
             var edgeCount = store.getAllEdges().size();
             var tier = store.getConfig("tier");
             System.out.printf("Done! Tier: %s, %d nodes, %d edges indexed.%n", tier, nodeCount, edgeCount);
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException("Could not lock the index for " + projectPath, e);
         }
     }
 }

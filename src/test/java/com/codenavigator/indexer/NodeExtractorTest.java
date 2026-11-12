@@ -240,4 +240,24 @@ class NodeExtractorTest {
         assertThat(nodes.getFirst().codeSnippet()).contains("class Utility");
         assertThat(nodes.getFirst().codeSnippet()).contains("doSomething");
     }
+
+    @Test
+    void nestedTypesOfOneSimpleNameInTwoFilesGetOuterQualifiedIdsAndKeepTheSimpleName() {
+        var a = extract(Project.GENERIC, "package p; public class A { static class Chain { void next() {} } }");
+        var b = extract(Project.GENERIC, "package p; public class B { static class Chain { void next() {} } }");
+
+        assertThat(a).extracting(Node::id).containsExactlyInAnyOrder("p.A", "p.A.Chain");
+        assertThat(b).extracting(Node::id).containsExactlyInAnyOrder("p.B", "p.B.Chain");
+        assertThat(a).filteredOn(n -> n.id().equals("p.A.Chain")).extracting(Node::name, Node::qualifiedName)
+            .containsExactly(org.assertj.core.groups.Tuple.tuple("Chain", "p.A.Chain"));
+    }
+
+    @Test
+    void nestedRecordEnumAndDeepTypesGetOuterQualifiedIds() {
+        var nodes = extract(Project.GENERIC,
+            "package p; public class A { record R(int x) {} enum E { X } class B { class C {} } }");
+
+        assertThat(nodes).extracting(Node::id)
+            .containsExactlyInAnyOrder("p.A", "p.A.R", "p.A.E", "p.A.B", "p.A.B.C");
+    }
 }

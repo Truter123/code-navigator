@@ -18,7 +18,15 @@ public final class MethodIds {
 
     public static final char SEPARATOR = '#';
 
+    /** The method name of a constructor node: {@code com.Foo#<init>(int)}. */
+    public static final String INIT = "<init>";
+
     private MethodIds() {}
+
+    /** True when {@code id} is a constructor node id. */
+    public static boolean isConstructor(String id) {
+        return INIT.equals(methodName(id));
+    }
 
     /** Build the node id for a method declared on {@code classFqn}. */
     public static String of(String classFqn, String methodName, List<String> paramTypes) {
@@ -75,7 +83,6 @@ public final class MethodIds {
         int lastDot = t.lastIndexOf('.');
         if (lastDot >= 0) t = t.substring(lastDot + 1);
         t = t.replaceAll("\\s+", "");
-        if (t.length() > 40) t = t.substring(0, 40);
         return t.isBlank() ? "?" : t;
     }
 }

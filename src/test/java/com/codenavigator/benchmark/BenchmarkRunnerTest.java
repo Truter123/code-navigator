@@ -86,4 +86,51 @@ class BenchmarkRunnerTest {
                 .isLessThan(100.0);
         }
     }
+
+    @Test
+    void semanticContextBaselineCoversEveryFileTheReplyNamesAndSavesTokens() {
+        var root = Paths.get("src/test/resources/sample-ddd");
+        var traversal = new GraphTraversal(store);
+        var search = new com.codenavigator.search.SearchService(store, traversal);
+        var runner = new BenchmarkRunner(store, traversal, tempDir, new TokenEstimator(), root);
+
+        var row = runner.runSemanticContext(search, "modify order creation");
+
+        assertThat(row.scenario()).isEqualTo("semantic-context");
+        var named = com.codenavigator.mcp.ContextReport.forTask(search, "modify order creation", 10).files();
+        assertThat(named).isNotEmpty();
+        assertThat(runner.lastSemanticBaselineFiles()).containsAll(named);
+        assertThat(row.pctSavings()).isGreaterThan(0.0);
+    }
+
+    @Test
+    void semanticContextWithSeedsPrintsAPercentageAndTheBaselineLine() {
+        var root = Paths.get("src/test/resources/sample-ddd");
+        var traversal = new GraphTraversal(store);
+        var search = new com.codenavigator.search.SearchService(store, traversal);
+        var runner = new BenchmarkRunner(store, traversal, tempDir, new TokenEstimator(), root);
+
+        var row = runner.runSemanticContext(search, "modify order creation");
+
+        assertThat(row.measured()).isTrue();
+        assertThat(new MarkdownTableRenderer().render(List.of(row))).doesNotContain("n/a");
+        assertThat(runner.lastSemanticNote()).matches(
+            "semantic-context baseline: \\d+ file\\(s\\) from keyword hits, \\d+ more named by the reply\\.");
+    }
+
+    @Test
+    void semanticContextWithoutSeedsPrintsNotApplicableAndTheNote() {
+        var root = Paths.get("src/test/resources/sample-ddd");
+        var traversal = new GraphTraversal(store);
+        var search = new com.codenavigator.search.SearchService(store, traversal);
+        var runner = new BenchmarkRunner(store, traversal, tempDir, new TokenEstimator(), root);
+
+        var row = runner.runSemanticContext(search, "where does zzqxv happen");
+
+        assertThat(row.measured()).isFalse();
+        assertThat(new MarkdownTableRenderer().render(List.of(row))).contains("| n/a |").doesNotContain("0.0%");
+        assertThat(runner.lastSemanticNote()).isEqualTo(
+            "semantic-context: the query \"where does zzqxv happen\" matches nothing in this project; "
+                + "pass --query \"<a task that fits it>\".");
+    }
 }

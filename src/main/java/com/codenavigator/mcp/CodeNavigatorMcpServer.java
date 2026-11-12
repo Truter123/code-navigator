@@ -2,6 +2,7 @@ package com.codenavigator.mcp;
 
 import com.codenavigator.cli.ProjectPaths;
 import com.codenavigator.export.ExportService;
+import com.codenavigator.git.IndexFreshness;
 import com.codenavigator.graph.*;
 import com.codenavigator.search.SearchService;
 import tools.jackson.databind.json.JsonMapper;
@@ -116,8 +117,10 @@ public class CodeNavigatorMcpServer {
                     .description("Before editing a symbol: blast radius, DDD-significant nodes in range, test-only share of the fallout.")
                     .inputSchema(jsonSchema(
                         withProjectPath(Map.of("symbol", propString("Class, fqn, or Class#method"),
-                               "depth", propInt("Depth (default 2)"))),
-                        List.of("symbol")))
+                               "depth", propInt("Depth (default 2)"),
+                               "diff", propString("true = uncommitted changes; or a git ref. Makes symbol optional"),
+                               "limit", propInt("Max changed rows with diff (default 10)"))),
+                        List.of()))
                     .build(),
                 (exchange, request) -> guarded("cg_guard", request.arguments())
             )
@@ -314,7 +317,8 @@ public class CodeNavigatorMcpServer {
             coChangeByFile.put(pair.otherFile(), pair.count());
         }
 
-        var nodes = applyGranularity(scope.traversal().impact(nodeId, depth), args, originNode);
+        var nodes = withoutLibraryFlood(applyGranularity(scope.traversal().related(nodeId, depth), args, originNode),
+            args, originNode, store, depth <= 1);
         var sb = new StringBuilder();
         sb.append("## Impact of ").append(symbol).append(" (depth ").append(depth).append(")\n\n");
         sb.append(ambiguityNote(candidatesFor(store, symbol)));
@@ -337,6 +341,9 @@ public class CodeNavigatorMcpServer {
         var scope = resolveScope(args);
         String symbol = (String) args.get("symbol");
         int depth = getIntArg(args, "depth", 2);
+        String diffArg = diffArgOf(args);
+        if (diffArg != null) return guardDiff(scope, diffArg, depth, getIntArg(args, "limit", 10));
+        if (symbol == null || symbol.isBlank()) return "Missing required parameter: symbol";
         String nodeId = resolveSymbol(scope.store(), symbol);
         if (nodeId == null) return "Symbol '" + symbol + "' not found.";
 
@@ -344,37 +351,44 @@ public class CodeNavigatorMcpServer {
         return ambiguityNote(candidatesFor(scope.store(), symbol)) + builder.build(nodeId, depth);
     }
 
+    /** The {@code diff} argument as text, or null when absent, blank or "false". A given {@code symbol} is ignored with it. */
+    private static String diffArgOf(Map<String, Object> args) {
+        Object raw = args.get("diff");
+        if (raw == null) return null;
+        String text = String.valueOf(raw).trim();
+        return text.isEmpty() || text.equalsIgnoreCase("false") ? null : text;
+    }
+
+    private String guardDiff(ProjectScope scope, String diffArg, int depth, int limit) {
+        var diff = com.codenavigator.git.DiffSymbols.collect(scope.root(), scope.store(), diffArg);
+        switch (diff.status()) {
+            case NOT_A_GIT_REPO:
+                return "Not a git repository: " + scope.root() + ". `diff` needs git; pass `symbol` instead.";
+            case UNKNOWN_REF:
+                return "Unknown git ref '" + diff.ref() + "'. Pass `diff=true` for uncommitted changes or a branch, tag or sha.";
+            case NO_CHANGES:
+                return "No changes against " + diff.ref() + ".";
+            default:
+        }
+        if (diff.nodeIds().isEmpty()) {
+            return diff.changedFiles() + " changed file(s) against " + diff.ref() + ", none holds an indexed symbol.";
+        }
+        // reply() prepends the stale line; the room left free below the cap covers it.
+        int budget = MAX_OUTPUT_LENGTH - CAP_NOTE_ROOM;
+        return new GuardReportBuilder(scope.store(), scope.traversal())
+            .buildForDiff(diff, depth, limit <= 0 ? 10 : limit, budget);
+    }
+
     String handleCgContext(Map<String, Object> args) {
         var scope = resolveScope(args);
-        String task = (String) args.get("task");
-        int limit = getIntArg(args, "limit", 10);
-        var nodes = scope.search().contextSearch(task);
-        if (nodes.isEmpty()) return "No relevant nodes found for task: " + task;
-
-        var byFile = nodes.stream().collect(Collectors.groupingBy(
-            Node::filePath, LinkedHashMap::new, Collectors.toList()));
-
-        // One line per file with its symbols inline, under its directory line. The old shape spent
-        // a heading and a bullet per node — ~3,800 tokens for a starting point the caller reads
-        // and then narrows.
-        var sb = new StringBuilder();
-        sb.append("## Context for: ").append(task).append("\n");
-        sb.append(nodes.size()).append(" node(s) across ").append(byFile.size()).append(" file(s)");
-        if (byFile.size() > limit) sb.append(" (showing ").append(limit).append(" files)");
-        sb.append("\n\n");
-
-        DirectoryRows.append(sb, byFile.entrySet().stream().limit(limit).toList(), Map.Entry::getKey,
-            (entry, file) -> file + " — "
-                + entry.getValue().stream()
-                    .map(n -> n.type() + " " + n.name())
-                    .limit(6)
-                    .collect(Collectors.joining(", "))
-                + (entry.getValue().size() > 6 ? ", +" + (entry.getValue().size() - 6) : ""));
-        if (byFile.size() > limit) {
-            sb.append("\n… ").append(byFile.size() - limit)
-              .append(" more file(s). Raise `limit` or describe the task more narrowly.\n");
+        Object rawTask = args.get("task");
+        String task = rawTask instanceof String t ? t : null;
+        if (task == null || task.isBlank()) {
+            return "`task` is required: describe the change or question in a few words.";
         }
-        return sb.toString();
+        int limit = getIntArg(args, "limit", 10);
+        if (limit <= 0) limit = 10;
+        return ContextReport.forTask(scope.search(), task, limit).text();
     }
 
     String handleCgSearch(Map<String, Object> args) {
@@ -585,6 +599,7 @@ public class CodeNavigatorMcpServer {
             incoming ? scope.traversal().callers(nodeId, depth)
                      : scope.traversal().callees(nodeId, depth),
             args, start);
+        nodes = withoutLibraryFlood(nodes, args, start, scope.store(), true);
         // "Callers"/"Callees" reads right for a method; a non-method node (SQL_TABLE, SHELL_SCRIPT,
         // ...) has no callers, only things that connect to it — "Incoming to"/"Outgoing from" is
         // the smallest heading change that still reads right there.
@@ -779,15 +794,13 @@ public class CodeNavigatorMcpServer {
      * methods (a class and its methods are one place, so depth 0 with {@code granularity=method} is the
      * class and nothing a call away; depth 1 would add every callee) and a method's callers. The rest
      * are the closest walk that crosses the edge, a superset where the node has other edges of that
-     * kind. A type the directional walk does not follow (RETURNS_TYPE, EMITS_EVENT, EXTENDS, ...) is
-     * only in the undirected one, hence {@code both}.
+     * kind. Every edge type is followed in its own direction, so the pointer keeps it.
      */
     private static String pointer(String handle, String direction, EdgeType type) {
         if (type == EdgeType.DECLARES_METHOD && direction.equals("out")) {
             return handle + " direction=out depth=0 granularity=method";
         }
-        String walk = GraphTraversal.followedDirectionally(type) ? direction : "both";
-        return handle + " direction=" + walk + " depth=1";
+        return handle + " direction=" + direction + " depth=1";
     }
 
     /**
@@ -889,6 +902,8 @@ public class CodeNavigatorMcpServer {
         sb.append("- **Nodes:** ").append(nodeCount).append(" nodes\n");
         sb.append("- **Edges:** ").append(edgeCount).append(" edges\n");
         sb.append("- **Files:** ").append(fileCount).append(" files\n");
+        IndexFreshness.check(store, scope.root()).ifPresent(state ->
+            sb.append("- **Index:** ").append(state.mapValue()).append("\n"));
 
         var allNodes = store.getAllNodes();
         var byType = allNodes.stream().collect(Collectors.groupingBy(Node::type, Collectors.counting()));
@@ -1223,8 +1238,9 @@ public class CodeNavigatorMcpServer {
         // Build node-id -> package map
         Map<String, String> nodePackage = new HashMap<>();
         Map<String, List<Node>> byPackage = new LinkedHashMap<>();
+        var packages = new PackageNames(allNodes);
         for (var node : allNodes) {
-            String pkg = extractPackage(node.qualifiedName());
+            String pkg = packages.of(node.qualifiedName());
             nodePackage.put(node.id(), pkg);
             byPackage.computeIfAbsent(pkg, k -> new ArrayList<>()).add(node);
         }
@@ -1391,11 +1407,6 @@ public class CodeNavigatorMcpServer {
 
 
 
-    private static String extractPackage(String qualifiedName) {
-        int lastDot = qualifiedName.lastIndexOf('.');
-        return lastDot > 0 ? qualifiedName.substring(0, lastDot) : qualifiedName;
-    }
-
     // ---- Private helpers ----
 
     /**
@@ -1460,10 +1471,13 @@ public class CodeNavigatorMcpServer {
         // parameter list the id carries.
         if (MethodIds.isMethodId(symbol)) return resolveMethodSymbol(store, symbol);
 
+        // "Outer.Inner" is not an id, but a nested type's id ends with it at a segment boundary.
+        String suffix = symbol.indexOf('.') > 0 ? "." + symbol.toLowerCase() : null;
         var all = store.getAllNodes().stream()
             .filter(n -> n.name().equalsIgnoreCase(symbol)
                 || n.qualifiedName().equalsIgnoreCase(symbol)
-                || n.id().equalsIgnoreCase(symbol))
+                || n.id().equalsIgnoreCase(symbol)
+                || (suffix != null && n.id().toLowerCase().endsWith(suffix)))
             .toList();
         // A bare name means the type, not one of its methods — otherwise cg_node("save") would
         // answer with whichever repository method happened to sort first.
@@ -1541,6 +1555,8 @@ public class CodeNavigatorMcpServer {
     private static boolean matchesClass(String declaring, String wanted) {
         if (declaring == null || wanted == null || wanted.isBlank()) return true;
         if (declaring.equalsIgnoreCase(wanted)) return true;
+        // "Outer.Inner": a nested type's id ends with it at a segment boundary
+        if (wanted.indexOf('.') > 0 && declaring.toLowerCase().endsWith("." + wanted.toLowerCase())) return true;
         int dot = declaring.lastIndexOf('.');
         String simple = dot >= 0 ? declaring.substring(dot + 1) : declaring;
         return simple.equalsIgnoreCase(wanted);
@@ -1553,6 +1569,25 @@ public class CodeNavigatorMcpServer {
      * class gets a class-level answer, asking about a method gets a method-level one, and
      * {@code granularity} overrides both.
      */
+    /**
+     * LIBRARY nodes are shared by every type that imports them, so a default {@code cg_related} walk
+     * listed a dozen of them ahead of the real neighbours. They stay only as the start node's own
+     * libraries (depth 1), and only when {@code keepOwn} or the caller chose a {@code direction}.
+     */
+    private static List<Node> withoutLibraryFlood(List<Node> nodes, Map<String, Object> args, Node start,
+                                                  GraphStore store, boolean keepOwn) {
+        if (nodes.stream().noneMatch(n -> n.type() == NodeType.LIBRARY)) return nodes;
+        Set<String> adjacent = new HashSet<>();
+        if ((keepOwn || args.containsKey("direction")) && start != null && start.type() != NodeType.LIBRARY) {
+            store.findEdgesFrom(start.id()).forEach(e -> adjacent.add(e.targetId()));
+            store.findEdgesTo(start.id()).forEach(e -> adjacent.add(e.sourceId()));
+        }
+        return nodes.stream()
+            .filter(n -> n.type() != NodeType.LIBRARY || (start != null && start.type() == NodeType.LIBRARY)
+                || adjacent.contains(n.id()))
+            .toList();
+    }
+
     static List<Node> applyGranularity(List<Node> nodes, Map<String, Object> args, Node start) {
         String requested = args.containsKey("granularity")
             ? String.valueOf(args.get("granularity")).toLowerCase(Locale.ROOT) : "auto";
@@ -1613,10 +1648,14 @@ public class CodeNavigatorMcpServer {
      * the gap visible and tells the caller how to close it.
      */
     static String truncateOutput(String text, String tool) {
-        if (text.length() <= MAX_OUTPUT_LENGTH) return text;
+        return truncateOutput(text, tool, MAX_OUTPUT_LENGTH);
+    }
 
-        int cut = text.lastIndexOf('\n', MAX_OUTPUT_LENGTH);
-        if (cut < MAX_OUTPUT_LENGTH / 2) cut = MAX_OUTPUT_LENGTH;   // one enormous line
+    private static String truncateOutput(String text, String tool, int cap) {
+        if (text.length() <= cap) return text;
+
+        int cut = text.lastIndexOf('\n', cap);
+        if (cut < cap / 2) cut = cap;   // one enormous line
         String kept = text.substring(0, cut);
 
         long shown = kept.lines().count();
@@ -1667,13 +1706,33 @@ public class CodeNavigatorMcpServer {
 
     String reply(String tool, Map<String, Object> args) {
         try {
+            String stale = staleLine(tool, args);
+            int cap = MAX_OUTPUT_LENGTH - stale.length();   // the stale line is never the part that is cut
             String text = handle(tool, args);
-            if (text.length() <= MAX_OUTPUT_LENGTH || !LIMIT_DEFAULTS.containsKey(tool)) {
-                return truncateOutput(text, tool);
+            if (text.length() <= cap || !LIMIT_DEFAULTS.containsKey(tool)) {
+                return stale + truncateOutput(text, tool, cap);
             }
-            return withinCap(tool, args, text);
+            return stale + withinCap(tool, args, text, cap);
         } catch (ProjectNotIndexedException e) {
             return truncateOutput(e.getMessage(), tool);
+        }
+    }
+
+    /**
+     * The one line every tool but {@code cg_map} (which has its own Index row) opens with when the
+     * index is behind the code, plus a blank line; empty when current or unknown, and when the scope
+     * does not resolve, so the handler's own error stands alone.
+     */
+    private String staleLine(String tool, Map<String, Object> args) {
+        if ("cg_map".equals(tool)) return "";
+        try {
+            var scope = resolveScope(args);
+            return IndexFreshness.check(scope.store(), scope.root())
+                .filter(state -> !state.current())
+                .map(state -> state.staleLine() + "\n\n")
+                .orElse("");
+        } catch (RuntimeException e) {
+            return "";
         }
     }
 
@@ -1689,9 +1748,9 @@ public class CodeNavigatorMcpServer {
      * passes first when the limit asked for was twice the rows that exist. A row is a line, so the
      * lines of the first reply bound the rows it holds and start the search.
      */
-    private String withinCap(String tool, Map<String, Object> args, String text) {
+    private String withinCap(String tool, Map<String, Object> args, String text, int cap) {
         int asked = getIntArg(args, "limit", LIMIT_DEFAULTS.get(tool));
-        int room = MAX_OUTPUT_LENGTH - CAP_NOTE_ROOM;
+        int room = cap - CAP_NOTE_ROOM;
         int fits = 0;                                              // largest limit measured to fit
         int over = (int) Math.min(asked, text.lines().count());    // smallest limit known not to fit
         String best = null;
@@ -1709,12 +1768,12 @@ public class CodeNavigatorMcpServer {
                 smallestOver = reply;
             }
         }
-        if (best == null) return truncateOutput(smallestOver, tool);
+        if (best == null) return truncateOutput(smallestOver, tool, cap);
         String also = NARROWING.get(tool);
         String note = "\n(`limit` lowered from " + asked + " to " + fits + ": a reply is capped at "
             + String.format(Locale.ROOT, "%,d", MAX_OUTPUT_LENGTH) + " chars."
             + (also == null ? "" : " Narrow with " + also + " instead.") + ")\n";
-        return best.length() + note.length() <= MAX_OUTPUT_LENGTH ? best + note : truncateOutput(best, tool);
+        return best.length() + note.length() <= cap ? best + note : truncateOutput(best, tool, cap);
     }
 
     private String handle(String tool, Map<String, Object> args) {

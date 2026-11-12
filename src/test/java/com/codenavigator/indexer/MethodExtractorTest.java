@@ -178,4 +178,18 @@ class MethodExtractorTest {
 
         assertThat(methods.get(0).node().id()).isEqualTo("com.sample.Svc#save(List,String)");
     }
+
+    @Test
+    void methodsOfNestedTypesOfOneSimpleNameGetIdsOnTheirOuterQualifiedType() {
+        var ids = new java.util.ArrayList<String>();
+        for (String outer : new String[]{"A", "B"}) {
+            var cu = com.github.javaparser.StaticJavaParser.parse(
+                "package p; public class " + outer + " { static class Chain { void next() {} } }");
+            var nodes = new NodeExtractor(com.codenavigator.graph.Project.GENERIC).extract(cu, outer + ".java");
+            new MethodExtractor().extract(cu, nodes, outer + ".java", 0L).stream()
+                .filter(m -> m.node() != null).forEach(m -> ids.add(m.node().id()));
+        }
+
+        assertThat(ids).containsExactlyInAnyOrder("p.A.Chain#next()", "p.B.Chain#next()");
+    }
 }

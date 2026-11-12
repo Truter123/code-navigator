@@ -4,18 +4,25 @@ import com.codenavigator.graph.*;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.FieldDeclaration;
+import com.github.javaparser.ast.body.InitializerDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
 import com.github.javaparser.ast.body.Parameter;
 import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.expr.FieldAccessExpr;
 import com.github.javaparser.ast.expr.MethodCallExpr;
+import com.github.javaparser.ast.expr.MethodReferenceExpr;
+import com.github.javaparser.ast.expr.SuperExpr;
+import com.github.javaparser.ast.expr.TypeExpr;
 import com.github.javaparser.ast.expr.NameExpr;
+import com.github.javaparser.ast.expr.ObjectCreationExpr;
+import com.github.javaparser.ast.stmt.ExplicitConstructorInvocationStmt;
 import com.github.javaparser.ast.expr.ThisExpr;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -48,17 +55,7 @@ public class MethodCallExtractor {
      * below is now an in-memory map hit.
      */
     private final Map<String, List<String>> methodIdsByClass = new LinkedHashMap<>();
-    private final Map<String, List<String>> typeIdsBySimpleName = new HashMap<>();
-    private final Set<String> knownTypeIds = new HashSet<>();
-
-    /**
-     * Source file per type node id, used only to tell a Java candidate from a TypeScript/Dart one
-     * when a simple name is ambiguous across languages of the same indexed project (see
-     * {@link #isJavaType}). The other indexers store bare simple names as ids (CLAUDE.md, Symbol
-     * resolution), so an id containing a '.' is not itself a reliable language signal once a Java
-     * type happens to sit in the default package.
-     */
-    private final Map<String, String> typeFilePathById = new HashMap<>();
+    private final JavaTypeResolver resolver;
 
     /**
      * Call-site counters for the indexer's summary line.
@@ -92,14 +89,16 @@ public class MethodCallExtractor {
 
     public MethodCallExtractor(GraphStore store) {
         this.store = store;
-        for (Node n : store.getAllNodes()) {
+        var allNodes = store.getAllNodes();
+        this.resolver = new JavaTypeResolver(allNodes);
+        for (Node n : allNodes) {
+            // LIBRARY nodes are minted by the edge pass and SHELL_COMMAND nodes are not Java types:
+            // a full run builds this before the first exists and a partial run builds it after, so
+            // neither may reach the maps or the two runs would resolve against different graphs.
+            if (n.type() == NodeType.LIBRARY || n.type() == NodeType.SHELL_COMMAND) continue;
             if (n.type() == NodeType.METHOD) {
                 methodIdsByClass.computeIfAbsent(MethodIds.declaringClass(n.id()), k -> new ArrayList<>())
                     .add(n.id());
-            } else {
-                knownTypeIds.add(n.id());
-                typeIdsBySimpleName.computeIfAbsent(n.name(), k -> new ArrayList<>()).add(n.id());
-                typeFilePathById.put(n.id(), n.filePath());
             }
         }
     }
@@ -111,11 +110,43 @@ public class MethodCallExtractor {
     private record PendingCall(String callerId, String receiverClass, String name, int argCount) {}
 
     private final List<PendingCall> pending = new ArrayList<>();
+
+    /**
+     * One call in a chain ({@code a.b().c()}). The first link of a chain carries the class its
+     * receiver resolved to; every later link takes its class from the previous link's declared
+     * return type, which is only known once every file has been seen, so chains resolve in
+     * {@link #resolvePending}. Links are shared between the calls of one chain, so a builder chain
+     * of N calls is N links, resolved once each.
+     */
+    private static final class Link {
+        final Link parent;
+        final String baseClass;
+        final String name;
+        final int argCount;
+        Link(Link parent, String baseClass, String name, int argCount) {
+            this.parent = parent; this.baseClass = baseClass; this.name = name; this.argCount = argCount;
+        }
+    }
+
+    private record PendingChain(String callerId, Link link, boolean count) {}
+
+    /** Outcome of resolving one link; {@code returnClass} is null unless the link bound to one method. */
+    private record Resolved(List<String> targets, String returnClass, boolean dataType, boolean parentBound,
+                            String parentLabel) {}
+
+    private final List<PendingChain> pendingChains = new ArrayList<>();
+    /** Id of the type being walked: where a written type name is looked up first. */
+    private String currentOwner;
+    private final Map<String, JavaTypeResolver.FileContext> fileCtxByClass = new HashMap<>();
+    /** Declared return type (simple or qualified name) per method id; absent for void, primitives,
+     *  arrays, parameterised types and type variables, none of which can name an indexed type. */
+    private final Map<String, String> returnTypeByMethodId = new HashMap<>();
+    /** Per body: the chain link of each call, or empty when its chain cannot start. */
+    private Map<MethodCallExpr, Optional<Link>> currentChainLinks = new IdentityHashMap<>();
     private String currentCallerId;
     private Map<String, String> currentStaticImports = Map.of();
     private List<String> currentStaticWildcards = List.of();
-    private Map<String, String> currentImports = Map.of();
-    private List<String> currentWildcardImports = List.of();
+    private JavaTypeResolver.FileContext currentCtx = new JavaTypeResolver.FileContext("", Map.of(), List.of(), java.util.Set.of());
 
     /** Receiver type not knowable from source, or known but not indexed (JDK, framework). */
     public int receiverExternal() { return receiverExternal; }
@@ -126,6 +157,12 @@ public class MethodCallExtractor {
      * of scope rather than a miss.
      */
     public int receiverDataType() { return receiverDataType; }
+
+    /** Lets the resolver read the supertypes declared in files other than the one being extracted. */
+    public MethodCallExtractor withSourceRoot(java.nio.file.Path root) {
+        resolver.withSourceRoot(root);
+        return this;
+    }
 
     /** Receiver is an indexed type that declares methods: the calls this resolver is judged on. */
     public int receiverBehavioural() { return receiverBehavioural; }
@@ -161,30 +198,18 @@ public class MethodCallExtractor {
         this.currentStaticImports = staticImportByName;
         this.currentStaticWildcards = staticWildcardTypes;
 
-        // Type imports: the receiver-type disambiguator for a simple name that collides across
-        // languages of the same indexed project (an `Andon` aggregate and an Angular `Andon`
-        // model both indexed) or across Java packages.
-        var importByName = new HashMap<String, String>();
-        var wildcardImportPackages = new ArrayList<String>();
-        cu.getImports().forEach(imp -> {
-            if (imp.isStatic()) return;
-            String name = imp.getNameAsString();
-            if (imp.isAsterisk()) {
-                wildcardImportPackages.add(name);
-                return;
-            }
-            int lastDot = name.lastIndexOf('.');
-            if (lastDot > 0) {
-                importByName.put(name.substring(lastDot + 1), name);
-            }
-        });
-        this.currentImports = importByName;
-        this.currentWildcardImports = wildcardImportPackages;
+        // Type imports and the types this file declares: the receiver-type disambiguators for a
+        // simple name that collides across languages of the same indexed project (an `Andon`
+        // aggregate and an Angular `Andon` model both indexed) or across Java packages.
+        var fileCtx = JavaTypeResolver.FileContext.of(cu);
+        this.currentCtx = fileCtx;
 
         cu.findAll(ClassOrInterfaceDeclaration.class).forEach(decl -> {
-            String ownerFqn = packageName.isEmpty() ? decl.getNameAsString()
-                : packageName + "." + decl.getNameAsString();
+            String ownerFqn = JavaTypeResolver.typeId(packageName, decl);
             if (!methodIdsByClass.containsKey(ownerFqn)) return;
+            this.currentOwner = ownerFqn;
+
+            fileCtxByClass.put(ownerFqn, fileCtx);
 
             // Receiver name -> declared type, for fields (visible to every method in the class).
             var fieldTypes = new HashMap<String, String>();
@@ -199,49 +224,268 @@ public class MethodCallExtractor {
                         .map(p -> MethodIds.simplifyType(p.getTypeAsString()))
                         .toList());
                 if (!methodIdsByClass.getOrDefault(ownerFqn, List.of()).contains(callerId)) return;
-                currentCallerId = callerId;
+                String returnType = returnTypeName(caller, decl);
+                if (returnType != null) returnTypeByMethodId.put(callerId, returnType);
+                walkBody(caller, List.of(callerId), caller.getParameters(), fieldTypes, ownerFqn,
+                    packageName, decl, edges);
+            });
 
-                // Parameters and locals shadow fields within this method body.
-                var scopeTypes = new HashMap<>(fieldTypes);
-                caller.getParameters().forEach((Parameter p) ->
-                    scopeTypes.put(p.getNameAsString(), p.getTypeAsString()));
-                caller.findAll(VariableDeclarator.class).forEach(v ->
-                    scopeTypes.put(v.getNameAsString(), v.getType().asString()));
+            // Constructors: the caller is the constructor's own <init> node.
+            var known = methodIdsByClass.getOrDefault(ownerFqn, List.of());
+            var ctorIds = new ArrayList<String>();
+            decl.getConstructors().forEach(ctor -> {
+                String ctorId = MethodIds.of(ownerFqn, MethodIds.INIT,
+                    ctor.getParameters().stream()
+                        .map(p -> MethodIds.simplifyType(p.getTypeAsString()))
+                        .toList());
+                if (!known.contains(ctorId)) return;
+                ctorIds.add(ctorId);
+                walkBody(ctor, List.of(ctorId), ctor.getParameters(), fieldTypes, ownerFqn,
+                    packageName, decl, edges);
+            });
 
-                var seen = new HashSet<String>();
-                caller.findAll(MethodCallExpr.class).forEach(call -> {
-                    callSitesSeen++;
-                    var targets = resolveTarget(call, ownerFqn, packageName, scopeTypes);
-                    if (!targets.isEmpty()) callSitesResolved++;
-                    for (String targetId : targets) {
-                        if (targetId.equals(callerId)) continue;        // direct recursion
-                        if (!seen.add(targetId)) continue;
-                        edges.add(new Edge(UUID.randomUUID().toString(),
-                            EdgeType.CALLS, callerId, targetId));
+            // Instance initializer blocks run as part of every constructor; with none declared,
+            // they belong to the implicit <init>().
+            if (ctorIds.isEmpty()) {
+                String implicit = MethodIds.of(ownerFqn, MethodIds.INIT, List.of());
+                if (known.contains(implicit)) ctorIds.add(implicit);
+            }
+            if (!ctorIds.isEmpty()) {
+                decl.getMembers().forEach(member -> {
+                    if (member instanceof InitializerDeclaration init && !init.isStatic()) {
+                        walkBody(init, ctorIds, List.<Parameter>of(), fieldTypes, ownerFqn,
+                            packageName, decl, edges);
                     }
                 });
-            });
+            }
         });
 
         return edges;
     }
 
+    private static String returnTypeName(MethodDeclaration m, ClassOrInterfaceDeclaration decl) {
+        var type = m.getType();
+        if (!type.isClassOrInterfaceType()) return null;           // void, primitive, array
+        var ct = type.asClassOrInterfaceType();
+        if (ct.getTypeArguments().isPresent()) return null;        // List<Foo>: the callee is List's
+        String name = ct.getNameWithScope();
+        if (name.equals("var")) return null;
+        if (m.getTypeParameters().stream().anyMatch(tp -> tp.getNameAsString().equals(name))
+            || decl.getTypeParameters().stream().anyMatch(tp -> tp.getNameAsString().equals(name))) {
+            return null;                                           // a type variable
+        }
+        return name;
+    }
+
+    /** Walk one method, constructor or initializer body, emitting CALLS from every caller id. */
+    private void walkBody(com.github.javaparser.ast.Node body, List<String> callerIds,
+                          List<Parameter> params, Map<String, String> fieldTypes, String ownerFqn,
+                          String packageName, ClassOrInterfaceDeclaration decl, List<Edge> edges) {
+        // Parameters and locals shadow fields within this body.
+        var scopeTypes = new HashMap<>(fieldTypes);
+        params.forEach((Parameter p) -> scopeTypes.put(p.getNameAsString(), p.getTypeAsString()));
+        body.findAll(VariableDeclarator.class).forEach(v ->
+            scopeTypes.put(v.getNameAsString(), v.getType().asString()));
+
+        currentChainLinks = new IdentityHashMap<>();
+
+        // Call sites are counted once, however many constructors an initializer block feeds.
+        for (int i = 0; i < callerIds.size(); i++) {
+            String callerId = callerIds.get(i);
+            boolean count = i == 0;
+            currentCallerId = callerId;
+            var seen = new HashSet<String>();
+            java.util.function.Consumer<List<String>> link = targets -> {
+                for (String targetId : targets) {
+                    if (targetId.equals(callerId)) continue;        // direct recursion
+                    if (!seen.add(targetId)) continue;
+                    edges.add(new Edge(UUID.randomUUID().toString(),
+                        EdgeType.CALLS, callerId, targetId));
+                }
+            };
+            body.findAll(MethodCallExpr.class).forEach(call -> {
+                if (count) callSitesSeen++;
+                var targets = resolveTarget(call, ownerFqn, packageName, scopeTypes, count);
+                if (count && !targets.isEmpty()) callSitesResolved++;
+                link.accept(targets);
+            });
+            body.findAll(MethodReferenceExpr.class).forEach(ref ->
+                link.accept(resolveReference(ref, ownerFqn, packageName, scopeTypes, count)));
+            body.findAll(ObjectCreationExpr.class).forEach(oce ->
+                link.accept(resolveNew(oce, packageName, count)));
+            body.findAll(ExplicitConstructorInvocationStmt.class).forEach(stmt ->
+                link.accept(resolveExplicit(stmt, ownerFqn, packageName, decl, count)));
+        }
+    }
+
+    private List<String> initsOf(String classId) {
+        return methodIdsByClass.getOrDefault(classId, List.of()).stream()
+            .filter(MethodIds::isConstructor).toList();
+    }
+
+    /** {@code new X(a, b)}: every {@code <init>} of X with two parameters. */
+    private List<String> resolveNew(ObjectCreationExpr oce, String packageName, boolean count) {
+        if (count) callSitesSeen++;
+        String typeClass = resolveTypeToNodeId(
+            oce.getType().getNameWithScope(), packageName).orElse(null);
+        return bindConstructor(typeClass, oce.getArguments().size(), count,
+            "new:" + oce.getType().getNameAsString());
+    }
+
+    /** {@code this(...)} / {@code super(...)}: the matching-arity constructor of own or super class. */
+    private List<String> resolveExplicit(ExplicitConstructorInvocationStmt stmt, String ownerFqn,
+                                         String packageName, ClassOrInterfaceDeclaration decl,
+                                         boolean count) {
+        if (count) callSitesSeen++;
+        String target = ownerFqn;
+        if (!stmt.isThis()) {
+            target = decl.getExtendedTypes().isEmpty() ? null
+                : resolveTypeToNodeId(
+                    decl.getExtendedTypes(0).getNameWithScope(), packageName).orElse(null);
+        }
+        return bindConstructor(target, stmt.getArguments().size(), count,
+            stmt.isThis() ? "this(...)" : "super(...)");
+    }
+
+    private List<String> bindConstructor(String classId, int argCount, boolean count, String shape) {
+        if (classId == null) {
+            if (count) receiverExternal++;
+            return List.of();
+        }
+        var inits = initsOf(classId);
+        if (inits.isEmpty()) {
+            if (count) receiverDataType++;
+            return List.of();
+        }
+        if (count) receiverBehavioural++;
+        var hits = inits.stream().filter(id -> arityOf(id) == argCount).toList();
+        if (hits.isEmpty()) {
+            if (count) unresolvedByReceiver.merge("ctor-arity:" + shape + "/" + argCount, 1, Integer::sum);
+            return List.of();
+        }
+        if (count) callSitesResolved++;
+        return hits;
+    }
+
+    /** True when the candidates hold something other than constructors. */
+    private static boolean hasRealMethods(List<String> candidates) {
+        return candidates != null && candidates.stream().anyMatch(id -> !MethodIds.isConstructor(id));
+    }
+
+    /** Arity of a method reference is not knowable from source: every overload of the name links. */
+    private static final int ANY_ARITY = -1;
+
+    /**
+     * Resolve {@code Foo::bar}, {@code this::bar}, {@code super::bar} or {@code field::bar} to the
+     * same-name methods on the scope's type. {@code Foo::new} is a constructor reference, left to
+     * the constructor work and tallied under {@code methodref-new}. An unresolvable scope is counted
+     * under {@code methodref-scope}.
+     */
+    private List<String> resolveReference(MethodReferenceExpr ref, String ownerFqn, String packageName,
+                                          Map<String, String> scopeTypes, boolean count) {
+        String name = ref.getIdentifier();
+        var scope = ref.getScope();
+        if (count) callSitesSeen++;
+        if ("new".equals(name)) {
+            // Foo::new: every constructor of Foo (arity is not knowable from the reference).
+            String typeClass = scope instanceof TypeExpr te
+                ? resolveTypeToNodeId(te.getType().asString(), packageName)
+                    .orElse(null) : null;
+            if (typeClass == null) {
+                if (count) {
+                    receiverExternal++;
+                    unresolvedByReceiver.merge("methodref-new:" + scope, 1, Integer::sum);
+                }
+                return List.of();
+            }
+            var inits = initsOf(typeClass);
+            if (inits.isEmpty()) {
+                if (count) receiverDataType++;
+                return List.of();
+            }
+            if (count) { receiverBehavioural++; callSitesResolved++; }
+            return inits;
+        }
+
+        String receiverClass = null;
+        boolean viaSuper = false;
+        if (scope instanceof ThisExpr) {
+            receiverClass = ownerFqn;
+        } else if (scope instanceof SuperExpr) {
+            receiverClass = ownerFqn;
+            viaSuper = true;
+        } else if (scope instanceof TypeExpr te) {
+            // JavaParser reads a bare `name::m` as a type expression, so a field, parameter or
+            // local of that name shadows a type of the same name.
+            String typeText = te.getType().asString();
+            String declaredType = scopeTypes.get(typeText);
+            receiverClass = resolveTypeToNodeId(
+                declaredType != null ? declaredType : typeText, packageName)
+                .orElse(null);
+        } else {
+            String receiverName = null;
+            if (scope instanceof NameExpr ne) {
+                receiverName = ne.getNameAsString();
+            } else if (scope instanceof FieldAccessExpr fae && fae.getScope() instanceof ThisExpr) {
+                receiverName = fae.getNameAsString();
+            }
+            if (receiverName != null) {
+                String declaredType = scopeTypes.get(receiverName);
+                receiverClass = resolveTypeToNodeId(
+                    declaredType != null ? declaredType : receiverName, packageName)
+                    .orElse(null);
+            }
+        }
+
+        if (receiverClass == null) {
+            if (count) {
+                receiverExternal++;
+                unresolvedByReceiver.merge("methodref-scope:" + scope + "::" + name, 1, Integer::sum);
+            }
+            return List.of();
+        }
+        var candidates = methodIdsByClass.get(receiverClass);
+        if (!hasRealMethods(candidates)) {
+            if (count) receiverDataType++;
+            return List.of();
+        }
+        if (count) receiverBehavioural++;
+        if (!viaSuper) {
+            var direct = pickOverloads(candidates, name, ANY_ARITY);
+            if (!direct.isEmpty()) {
+                if (count) callSitesResolved++;
+                return direct;
+            }
+        }
+        pending.add(new PendingCall(currentCallerId, receiverClass, name, ANY_ARITY));
+        return List.of();
+    }
+
     /** Resolve one call site to method node ids, or empty when the receiver type is unknown. */
     private List<String> resolveTarget(MethodCallExpr call, String ownerFqn, String packageName,
-                                       Map<String, String> scopeTypes) {
+                                       Map<String, String> scopeTypes, boolean count) {
+        if (call.getScope().orElse(null) instanceof MethodCallExpr) {
+            var link = chainLink(call, ownerFqn, packageName, scopeTypes);
+            if (link == null) {
+                if (count) receiverExternal++;
+                return List.of();
+            }
+            pendingChains.add(new PendingChain(currentCallerId, link, count));
+            return List.of();
+        }
         String receiverClass = receiverClassOf(call, ownerFqn, packageName, scopeTypes).orElse(null);
         if (receiverClass == null) {
-            receiverExternal++;
+            if (count) receiverExternal++;
             return List.of();
         }
 
         var candidates = methodIdsByClass.get(receiverClass);
-        if (candidates == null || candidates.isEmpty()) {
-            receiverDataType++;
+        if (!hasRealMethods(candidates)) {
+            if (count) receiverDataType++;
             return List.of();
         }
 
-        receiverBehavioural++;
+        if (count) receiverBehavioural++;
         var direct = pickOverloads(candidates, call.getNameAsString(), call.getArguments().size());
         if (!direct.isEmpty()) return direct;
 
@@ -251,6 +495,41 @@ public class MethodCallExtractor {
         pending.add(new PendingCall(currentCallerId, receiverClass,
             call.getNameAsString(), call.getArguments().size()));
         return List.of();
+    }
+
+    /**
+     * The chain link for {@code call} (whose scope is a call), or null when the innermost receiver
+     * is unknown. Walks down to the innermost call iteratively and memoises every link per body.
+     */
+    private Link chainLink(MethodCallExpr call, String ownerFqn, String packageName,
+                           Map<String, String> scopeTypes) {
+        var pendingCalls = new ArrayList<MethodCallExpr>();
+        Optional<Link> parent = Optional.empty();
+        boolean parentKnown = false;
+        MethodCallExpr c = call;
+        while (true) {
+            var memo = currentChainLinks.get(c);
+            if (memo != null) { parent = memo; parentKnown = true; break; }
+            pendingCalls.add(c);
+            if (c.getScope().orElse(null) instanceof MethodCallExpr inner) c = inner;
+            else break;
+        }
+        if (!parentKnown) {
+            // pendingCalls ends with the innermost call, whose receiver is not a call.
+            var innermost = pendingCalls.remove(pendingCalls.size() - 1);
+            String base = receiverClassOf(innermost, ownerFqn, packageName, scopeTypes).orElse(null);
+            parent = base == null ? Optional.empty()
+                : Optional.of(new Link(null, base, innermost.getNameAsString(),
+                    innermost.getArguments().size()));
+            currentChainLinks.put(innermost, parent);
+        }
+        for (int i = pendingCalls.size() - 1; i >= 0; i--) {
+            var cur = pendingCalls.get(i);
+            var p = parent;
+            parent = p.map(l -> new Link(l, null, cur.getNameAsString(), cur.getArguments().size()));
+            currentChainLinks.put(cur, parent);
+        }
+        return parent.orElse(null);
     }
 
     /** Work out which indexed class the call's receiver refers to. */
@@ -270,7 +549,7 @@ public class MethodCallExtractor {
             }
             String importedFrom = currentStaticImports.get(call.getNameAsString());
             if (importedFrom != null) {
-                return knownTypeIds.contains(importedFrom) ? Optional.of(importedFrom) : Optional.empty();
+                return resolver.isKnown(importedFrom) ? Optional.of(importedFrom) : Optional.empty();
             }
             for (String wildcard : currentStaticWildcards) {
                 if (methodIdsByClass.containsKey(wildcard)) return Optional.of(wildcard);
@@ -279,6 +558,11 @@ public class MethodCallExtractor {
             // means the call leaves the project rather than staying inside the caller.
             if (!currentStaticWildcards.isEmpty()) return Optional.empty();
             return Optional.of(ownerFqn);
+        }
+
+        // new Foo().bar(): the type is written out, so it is certain.
+        if (scope instanceof ObjectCreationExpr oce && oce.getAnonymousClassBody().isEmpty()) {
+            return resolveTypeToNodeId(oce.getType().getNameWithScope(), packageName);
         }
 
         String receiverName = null;
@@ -291,7 +575,7 @@ public class MethodCallExtractor {
 
         String declaredType = scopeTypes.get(receiverName);
         if (declaredType != null) {
-            return resolveTypeToNodeId(MethodIds.simplifyType(declaredType), packageName);
+            return resolveTypeToNodeId(declaredType, packageName);
         }
 
         // Not a field, parameter or local, so the receiver is a type name: a static call such as
@@ -312,7 +596,7 @@ public class MethodCallExtractor {
         var byName = candidates.stream()
             .filter(id -> name.equals(MethodIds.methodName(id)))
             .toList();
-        if (byName.size() <= 1) return byName;
+        if (byName.size() <= 1 || argCount == ANY_ARITY) return byName;
 
         var byArity = byName.stream().filter(id -> arityOf(id) == argCount).toList();
         return byArity.isEmpty() ? List.of() : byArity;
@@ -327,49 +611,11 @@ public class MethodCallExtractor {
     }
 
     /**
-     * Resolve a declared or referenced simple type name to an indexed node id.
-     *
-     * <p>Tried in order: the same package (existing declaration wins over an import of the same
-     * simple name), an explicit {@code import a.b.C;}, a unique hit through a wildcard {@code import
-     * a.b.*;}, then — for a name that still matches more than one indexed type — the same-language
-     * candidates. A name shared between a Java aggregate and a TypeScript/Dart model of the same
-     * name (CLAUDE.md, Symbol resolution) used to make every such receiver unresolvable; restricting
-     * to Java candidates here recovers it without guessing across languages. Still ambiguous (two
-     * Java candidates, no import) resolves to none, as before.
+     * Resolve a simple type name written in the current file to an indexed node id, through the
+     * shared {@link JavaTypeResolver} (its javadoc has the order and the reason for it).
      */
     private Optional<String> resolveTypeToNodeId(String simpleName, String packageName) {
-        if (!packageName.isEmpty()) {
-            String fqn = packageName + "." + simpleName;
-            if (knownTypeIds.contains(fqn)) return Optional.of(fqn);
-        }
-
-        String imported = currentImports.get(simpleName);
-        if (imported != null) {
-            return knownTypeIds.contains(imported) ? Optional.of(imported) : Optional.empty();
-        }
-
-        var matches = typeIdsBySimpleName.getOrDefault(simpleName, List.of());
-        if (matches.size() == 1) return Optional.of(matches.get(0));
-        if (matches.isEmpty()) return Optional.empty();
-
-        var wildcardMatches = currentWildcardImports.stream()
-            .map(pkg -> pkg + "." + simpleName)
-            .filter(knownTypeIds::contains)
-            .distinct()
-            .toList();
-        if (wildcardMatches.size() == 1) return Optional.of(wildcardMatches.get(0));
-
-        var javaMatches = matches.stream().filter(this::isJavaType).toList();
-        if (javaMatches.size() == 1) return Optional.of(javaMatches.get(0));
-
-        return Optional.empty();
-    }
-
-    /** Whether a type node's source lives in a {@code .java} file, as opposed to another indexed
-     *  language storing a colliding simple name. */
-    private boolean isJavaType(String typeId) {
-        String path = typeFilePathById.get(typeId);
-        return path != null && path.endsWith(".java");
+        return resolver.resolve(simpleName, currentCtx, currentOwner);
     }
 
     /**
@@ -381,7 +627,7 @@ public class MethodCallExtractor {
      * edges through interfaces.
      */
     public List<Edge> resolvePending() {
-        if (pending.isEmpty()) return List.of();
+        if (pending.isEmpty() && pendingChains.isEmpty()) return List.of();
 
         var superTypes = new HashMap<String, List<String>>();
         for (Edge e : store.getAllEdges()) {
@@ -409,7 +655,110 @@ public class MethodCallExtractor {
             }
         }
         pending.clear();
+
+        var resolved = new IdentityHashMap<Link, Resolved>();
+        for (PendingChain chain : pendingChains) {
+            var r = resolveLink(chain.link(), superTypes, resolved);
+            boolean count = chain.count();
+            if (!r.targets().isEmpty()) {
+                if (count) { receiverBehavioural++; callSitesResolved++; }
+                for (String targetId : r.targets()) {
+                    if (targetId.equals(chain.callerId())) continue;
+                    if (!seen.add(chain.callerId() + ">" + targetId)) continue;
+                    edges.add(new Edge(UUID.randomUUID().toString(),
+                        EdgeType.CALLS, chain.callerId(), targetId));
+                }
+            } else if (!count) {
+                continue;
+            } else if (r.dataType()) {
+                receiverDataType++;
+            } else if (r.parentLabel() != null) {
+                receiverExternal++;
+                unresolvedByReceiver.merge(r.parentLabel(), 1, Integer::sum);
+            } else if (!r.parentBound()) {
+                receiverExternal++;
+            } else {
+                receiverBehavioural++;
+                String name = chain.link().name;
+                if (isGeneratedAccessor(name)) accessorMiss++;
+                else unresolvedByReceiver.merge("chain-miss:" + name + "/" + chain.link().argCount,
+                    1, Integer::sum);
+            }
+        }
+        pendingChains.clear();
         return edges;
+    }
+
+    /**
+     * Resolve a chain link: its receiver class is the base class (first link) or the previous
+     * link's return type, which counts only when that link bound to exactly one indexed method.
+     * Iterative over the parent chain, memoised per link.
+     */
+    private Resolved resolveLink(Link link, Map<String, List<String>> superTypes,
+                                 Map<Link, Resolved> memo) {
+        var chain = new ArrayList<Link>();
+        for (Link l = link; l != null && !memo.containsKey(l); l = l.parent) chain.add(l);
+        for (int i = chain.size() - 1; i >= 0; i--) {
+            Link l = chain.get(i);
+            Resolved parentResult = l.parent == null ? null : memo.get(l.parent);
+            String receiverClass = l.parent == null ? l.baseClass : parentResult.returnClass();
+            Resolved r;
+            if (receiverClass == null) {
+                String label = null;
+                boolean parentBound = parentResult != null && !parentResult.targets().isEmpty();
+                if (parentBound) {
+                    String via = parentResult.targets().size() == 1 ? parentResult.targets().get(0)
+                        : parentResult.targets().size() + " overloads";
+                    label = "chain-return:" + via + ">" + l.name;
+                }
+                r = new Resolved(List.of(), null, false, parentBound, label);
+            } else {
+                var candidates = methodIdsByClass.get(receiverClass);
+                if (!hasRealMethods(candidates)) {
+                    r = new Resolved(List.of(), null, true, true, null);
+                } else {
+                    var targets = pickOverloads(candidates, l.name, l.argCount);
+                    if (targets.isEmpty()) {
+                        targets = findInHierarchy(new PendingCall(null, receiverClass, l.name, l.argCount),
+                            superTypes, new HashSet<>());
+                    }
+                    String returnClass = targets.size() == 1 ? returnClassOf(targets.get(0)) : null;
+                    r = new Resolved(targets, returnClass, false, true, null);
+                }
+            }
+            memo.put(l, r);
+        }
+        return memo.get(link);
+    }
+
+    /** The indexed class a method's declared return type names, resolved in its declaring file. */
+    private String returnClassOf(String methodId) {
+        var ctx = fileCtxByClass.get(MethodIds.declaringClass(methodId));
+        // A class parsed in this run answers from this run; any other class was parsed by an
+        // earlier run, whose answer was stored next to the graph.
+        if (ctx == null) return store.findReturnClass(methodId).orElse(null);
+        return resolveReturnClass(methodId, ctx);
+    }
+
+    private String resolveReturnClass(String methodId, JavaTypeResolver.FileContext ctx) {
+        String type = returnTypeByMethodId.get(methodId);
+        if (type == null) return null;
+        return resolver.resolve(type, ctx, MethodIds.declaringClass(methodId)).orElse(null);
+    }
+
+    /**
+     * Store the return class of every method parsed in this run, replacing the rows of those
+     * classes. Call once every file of the run has been seen: a return type may name a class
+     * declared in a file parsed later, which is why this is not done in {@link #extract}.
+     */
+    public void persistReturnClasses() {
+        for (String classId : fileCtxByClass.keySet()) store.deleteReturnClassesOfClass(classId);
+        for (String methodId : returnTypeByMethodId.keySet()) {
+            var ctx = fileCtxByClass.get(MethodIds.declaringClass(methodId));
+            if (ctx == null) continue;
+            String classId = resolveReturnClass(methodId, ctx);
+            if (classId != null) store.saveReturnClass(methodId, classId);
+        }
     }
 
     /**
@@ -451,23 +800,35 @@ public class MethodCallExtractor {
      * supertype. Runs after every class has been indexed and its supertype edges saved.
      */
     public List<Edge> deriveOverrides() {
+        return deriveOverrides(null);
+    }
+
+    /**
+     * Same, limited to the methods of the given classes (null: every class). An incremental sync
+     * re-derives only the classes of the files it re-extracted; the rest keep their stored edges.
+     */
+    public List<Edge> deriveOverrides(Set<String> onlyClasses) {
         var edges = new ArrayList<Edge>();
         var methodsByClass = methodIdsByClass;
 
         Set<EdgeType> superTypeEdges = Set.of(EdgeType.IMPLEMENTS, EdgeType.EXTENDS);
         for (var entry : methodsByClass.entrySet()) {
             String classFqn = entry.getKey();
+            if (onlyClasses != null && !onlyClasses.contains(classFqn)) continue;
             for (Edge superEdge : store.findEdgesFrom(classFqn)) {
                 if (!superTypeEdges.contains(superEdge.type())) continue;
                 var superMethods = methodsByClass.get(superEdge.targetId());
                 if (superMethods == null) continue;
 
                 for (String methodId : entry.getValue()) {
+                    if (MethodIds.isConstructor(methodId)) continue;   // a constructor never overrides
                     String name = MethodIds.methodName(methodId);
                     int arity = arityOf(methodId);
+                    // Same-name, same-arity overloads: the lowest id, never the lowest row, so a
+                    // node replaced in place gives the edge a fresh index would.
                     superMethods.stream()
                         .filter(sid -> name.equals(MethodIds.methodName(sid)) && arityOf(sid) == arity)
-                        .findFirst()
+                        .min(java.util.Comparator.naturalOrder())
                         .ifPresent(sid -> edges.add(new Edge(UUID.randomUUID().toString(),
                             EdgeType.OVERRIDES, methodId, sid)));
                 }

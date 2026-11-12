@@ -23,7 +23,7 @@ public class MarkdownTableRenderer {
             sb.append("| ").append(row.scenario())
               .append(" | ").append(NUM_FMT.format(row.baselineTokens()))
               .append(" | ").append(NUM_FMT.format(row.navigatorTokens()))
-              .append(" | ").append(row.pctSavings()).append("% |")
+              .append(" | ").append(row.measured() ? row.pctSavings() + "%" : "n/a").append(" |")
               .append("\n");
         }
         // Trim trailing newline so the string can be embedded cleanly

@@ -449,4 +449,375 @@ class MethodCallExtractorTest {
 
         assertThat(edges).isEmpty();
     }
+
+    // ---- method references ----
+
+    private java.util.List<Edge> extractRef(String body) {
+        saveClass("com.sample.Svc", NodeType.SERVICE);
+        saveClass("com.sample.Foo", NodeType.SERVICE);
+        saveClass("com.sample.Repo", NodeType.REPOSITORY);
+        saveMethod("com.sample.Svc", "run", "");
+        saveMethod("com.sample.Svc", "bar", "");
+        saveMethod("com.sample.Foo", "bar", "");
+        saveMethod("com.sample.Foo", "bar", "String");
+        saveMethod("com.sample.Repo", "save", "Object");
+        var cu = StaticJavaParser.parse(
+            "package com.sample;" +
+            "public class Svc {" +
+            "  private Repo repo;" +
+            "  public void run() { " + body + " }" +
+            "  public void bar() {}" +
+            "}");
+        return new MethodCallExtractor(store).extract(cu);
+    }
+
+    @Test
+    void typeNameMethodReferenceLinksEveryOverload() {
+        var edges = extractRef("list.forEach(Foo::bar);");
+        assertThat(edges).extracting(Edge::sourceId, Edge::type, Edge::targetId)
+            .containsExactlyInAnyOrder(
+                tuple3("com.sample.Svc#run()", EdgeType.CALLS, "com.sample.Foo#bar()"),
+                tuple3("com.sample.Svc#run()", EdgeType.CALLS, "com.sample.Foo#bar(String)"));
+    }
+
+    @Test
+    void thisMethodReferenceLinksOwnMethod() {
+        var edges = extractRef("list.forEach(this::bar);");
+        assertThat(edges).extracting(Edge::sourceId, Edge::type, Edge::targetId)
+            .containsExactly(tuple3("com.sample.Svc#run()", EdgeType.CALLS, "com.sample.Svc#bar()"));
+    }
+
+    @Test
+    void fieldMethodReferenceLinksFieldTypeMethod() {
+        var edges = extractRef("list.forEach(repo::save);");
+        assertThat(edges).extracting(Edge::sourceId, Edge::type, Edge::targetId)
+            .containsExactly(tuple3("com.sample.Svc#run()", EdgeType.CALLS,
+                "com.sample.Repo#save(Object)"));
+    }
+
+    @Test
+    void unknownScopeMethodReferenceIsDroppedAndCounted() {
+        saveClass("com.sample.Svc", NodeType.SERVICE);
+        saveMethod("com.sample.Svc", "run", "");
+        var cu = StaticJavaParser.parse(
+            "package com.sample;" +
+            "public class Svc { public void run() { Runnable r = unknown::bar; } }");
+        var extractor = new MethodCallExtractor(store);
+
+        var edges = extractor.extract(cu);
+
+        assertThat(edges).isEmpty();
+        assertThat(extractor.receiverExternal()).isEqualTo(1);
+        assertThat(extractor.topUnresolved(10)).extracting(java.util.Map.Entry::getKey)
+            .contains("methodref-scope:unknown::bar");
+    }
+
+    // ---- chained calls: a.b().c() resolves through b()'s declared return type ----
+
+    private java.util.List<Edge> extractAll(MethodCallExtractor ex, String... sources) {
+        var edges = new java.util.ArrayList<Edge>();
+        for (String src : sources) edges.addAll(ex.extract(StaticJavaParser.parse(src)));
+        edges.addAll(ex.resolvePending());
+        return edges;
+    }
+
+    private static final String CALLER =
+        "package com.sample; public class Svc { private A a; public void run() { a.b().c(); } }";
+
+    private void chainFixture() {
+        saveClass("com.sample.Svc", NodeType.SERVICE);
+        saveClass("com.sample.A", NodeType.SERVICE);
+        saveClass("com.sample.B", NodeType.SERVICE);
+        saveMethod("com.sample.Svc", "run", "");
+        saveMethod("com.sample.A", "b", "");
+        saveMethod("com.sample.B", "c", "");
+    }
+
+    @Test
+    void chainedCallBindsThroughIndexedReturnType() {
+        chainFixture();
+        var ex = new MethodCallExtractor(store);
+        var edges = extractAll(ex, CALLER,
+            "package com.sample; public class A { public B b() { return null; } }");
+        assertThat(edges).extracting(Edge::sourceId, Edge::targetId).containsExactlyInAnyOrder(
+            org.assertj.core.api.Assertions.tuple("com.sample.Svc#run()", "com.sample.A#b()"),
+            org.assertj.core.api.Assertions.tuple("com.sample.Svc#run()", "com.sample.B#c()"));
+        assertThat(ex.callSitesSeen()).isEqualTo(2);
+        assertThat(ex.callSitesResolved()).isEqualTo(2);
+    }
+
+    @Test
+    void returnTypeResolvesInDeclaringFileContext() {
+        saveClass("com.sample.Svc", NodeType.SERVICE);
+        saveClass("com.sample.A", NodeType.SERVICE);
+        saveClass("com.other.B", NodeType.SERVICE);
+        saveClass("com.third.B", NodeType.SERVICE);
+        saveMethod("com.sample.Svc", "run", "");
+        saveMethod("com.sample.A", "b", "");
+        saveMethod("com.other.B", "c", "");
+        saveMethod("com.third.B", "c", "");
+        var edges = extractAll(new MethodCallExtractor(store), CALLER,
+            "package com.sample; import com.other.B; public class A { public B b() { return null; } }");
+        assertThat(edges).extracting(Edge::targetId).contains("com.other.B#c()")
+            .doesNotContain("com.third.B#c()");
+    }
+
+    @Test
+    void parameterisedReturnTypeIsDroppedAndCounted() {
+        chainFixture();
+        var ex = new MethodCallExtractor(store);
+        var edges = extractAll(ex, CALLER,
+            "package com.sample; import java.util.List; public class A { public List<B> b() { return null; } }");
+        assertThat(edges).extracting(Edge::targetId).containsExactly("com.sample.A#b()");
+        assertThat(ex.receiverExternal()).isEqualTo(1);
+        assertThat(ex.topUnresolved(10)).extracting(java.util.Map.Entry::getKey)
+            .contains("chain-return:com.sample.A#b()>c");
+    }
+
+    @Test
+    void overloadsWithDifferentReturnTypesAreDropped() {
+        chainFixture();
+        saveMethod("com.sample.A", "b", "int");
+        var ex = new MethodCallExtractor(store);
+        var edges = extractAll(ex,
+            "package com.sample; public class Svc { private A a; public void run() { a.b(1).c(); } }",
+            "package com.sample; public class A { public B b(int x) { return null; } public C b(int y) { return null; } }");
+        assertThat(edges).extracting(Edge::targetId).doesNotContain("com.sample.B#c()");
+        assertThat(ex.receiverExternal()).isEqualTo(1);
+    }
+
+    @Test
+    void unindexedReturnTypeEmitsNoChainEdge() {
+        chainFixture();
+        var ex = new MethodCallExtractor(store);
+        var edges = extractAll(ex, CALLER,
+            "package com.sample; public class A { public String b() { return null; } }");
+        assertThat(edges).extracting(Edge::targetId).containsExactly("com.sample.A#b()");
+        assertThat(ex.receiverExternal()).isEqualTo(1);
+    }
+
+    @Test
+    void threeLinkChainEmitsThreeEdges() {
+        chainFixture();
+        saveClass("com.sample.C", NodeType.SERVICE);
+        saveMethod("com.sample.B", "c", "");
+        saveMethod("com.sample.C", "d", "");
+        var edges = extractAll(new MethodCallExtractor(store),
+            "package com.sample; public class Svc { private A a; public void run() { a.b().c().d(); } }",
+            "package com.sample; public class A { public B b() { return null; } }",
+            "package com.sample; public class B { public C c() { return null; } }");
+        assertThat(edges).extracting(Edge::targetId).containsExactlyInAnyOrder(
+            "com.sample.A#b()", "com.sample.B#c()", "com.sample.C#d()");
+    }
+
+    @Test
+    void newExpressionScopeBindsOnItsType() {
+        saveClass("com.sample.Svc", NodeType.SERVICE);
+        saveClass("com.sample.Foo", NodeType.SERVICE);
+        saveMethod("com.sample.Svc", "run", "");
+        saveMethod("com.sample.Foo", "bar", "");
+        var edges = extractAll(new MethodCallExtractor(store),
+            "package com.sample; public class Svc { public void run() { new Foo().bar(); } }");
+        assertThat(edges).extracting(Edge::targetId).contains("com.sample.Foo#bar()");
+    }
+
+    @Test
+    void longChainOnUnindexedTypeFinishesAndEmitsNothing() {
+        saveClass("com.sample.Svc", NodeType.SERVICE);
+        saveMethod("com.sample.Svc", "run", "");
+        var chain = new StringBuilder("Thing.start()");
+        for (int i = 0; i < 30; i++) chain.append(".step").append(i).append("()");
+        var ex = new MethodCallExtractor(store);
+        var edges = extractAll(ex,
+            "package com.sample; public class Svc { public void run() { " + chain + "; } }");
+        assertThat(edges).isEmpty();
+        assertThat(ex.callSitesSeen()).isEqualTo(31);
+    }
+
+    // ── Precedence: nested/own type, single-type import, same package (JLS 6.4.1) ──
+
+    private void saveFooPair() {
+        saveClass("a.Foo", NodeType.SERVICE);
+        saveMethod("a.Foo", "run", "");
+        saveClass("b.Foo", NodeType.SERVICE);
+        saveMethod("b.Foo", "run", "");
+        saveClass("a.Caller", NodeType.SERVICE);
+        saveMethod("a.Caller", "go", "");
+    }
+
+    @Test
+    void anExplicitImportBeatsASameNamedTypeOfTheSamePackage() {
+        saveFooPair();
+        var cu = StaticJavaParser.parse(
+            "package a; import b.Foo;" +
+            "public class Caller { private Foo foo; void go() { foo.run(); } }");
+
+        var edges = new MethodCallExtractor(store).extract(cu);
+
+        assertThat(edges).extracting(Edge::targetId).containsExactly("b.Foo#run()");
+    }
+
+    @Test
+    void withoutTheImportTheSamePackageTypeIsBound() {
+        saveFooPair();
+        var cu = StaticJavaParser.parse(
+            "package a;" +
+            "public class Caller { private Foo foo; void go() { foo.run(); } }");
+
+        var edges = new MethodCallExtractor(store).extract(cu);
+
+        assertThat(edges).extracting(Edge::targetId).containsExactly("a.Foo#run()");
+    }
+
+    @Test
+    void anImportedLibraryTypeShadowsASameNamedTypeOfThePackage() {
+        saveFooPair();
+        var cu = StaticJavaParser.parse(
+            "package a; import lib.Foo;" +
+            "public class Caller { private Foo foo; void go() { foo.run(); } }");
+
+        var edges = new MethodCallExtractor(store).extract(cu);
+
+        assertThat(edges).extracting(Edge::targetId).doesNotContain("a.Foo#run()");
+    }
+
+    @Test
+    void aNestedTypeShadowsAnImportOfTheSameSimpleName() {
+        saveClass("a.Caller", NodeType.SERVICE);
+        saveMethod("a.Caller", "go", "");
+        saveClass("a.Caller.Entry", NodeType.SERVICE);
+        saveMethod("a.Caller.Entry", "touch", "");
+        var cu = StaticJavaParser.parse(
+            "package a; import java.util.Map.Entry;" +
+            "public class Caller { private Entry e; void go() { e.touch(); }" +
+            "  static class Entry { void touch() {} } }");
+
+        var edges = new MethodCallExtractor(store).extract(cu);
+
+        assertThat(edges).extracting(Edge::targetId).containsExactly("a.Caller.Entry#touch()");
+    }
+
+    private void saveNestedChains() {
+        for (String c : new String[]{"p.A", "p.B"}) {
+            saveClass(c, NodeType.SERVICE);
+            saveMethod(c, "go", "");
+            saveClass(c + ".Chain", NodeType.SERVICE);
+            saveMethod(c + ".Chain", "next", "");
+        }
+        saveClass("q.Q", NodeType.SERVICE);
+        saveMethod("q.Q", "go", "");
+        saveClass("p.C", NodeType.SERVICE);
+        saveMethod("p.C", "go", "");
+    }
+
+    private java.util.List<String> targetsOf(String source) {
+        return new MethodCallExtractor(store).extract(StaticJavaParser.parse(source)).stream()
+            .map(Edge::targetId).toList();
+    }
+
+    @Test
+    void aNestedTypeOfOneSimpleNameInTwoFilesBindsToItsOwnOuterOnly() {
+        saveNestedChains();
+
+        assertThat(targetsOf("package p; public class A { private Chain c; void go() { c.next(); }"
+            + " static class Chain { void next() {} } }")).containsExactly("p.A.Chain#next()");
+        assertThat(targetsOf("package p; public class B { private Chain c; void go() { c.next(); }"
+            + " static class Chain { void next() {} } }")).containsExactly("p.B.Chain#next()");
+    }
+
+    @Test
+    void aMemberTypeWrittenWithItsOuterBindsFromAThirdFile() {
+        saveNestedChains();
+
+        assertThat(targetsOf("package p; class C { private A.Chain c; void go() { c.next(); } }"))
+            .containsExactly("p.A.Chain#next()");
+    }
+
+    @Test
+    void anImportOfANestedTypeBindsFromAnotherPackage() {
+        saveNestedChains();
+
+        assertThat(targetsOf("package q; import p.B.Chain; class Q { private Chain c; void go() { c.next(); } }"))
+            .containsExactly("p.B.Chain#next()");
+    }
+
+    @Test
+    void aWildcardImportOfAnOuterTypeBindsItsNestedType() {
+        saveNestedChains();
+
+        assertThat(targetsOf("package q; import p.B.*; class Q { private Chain c; void go() { c.next(); } }"))
+            .containsExactly("p.B.Chain#next()");
+    }
+
+    @Test
+    void aFullyQualifiedNestedTypeBinds() {
+        saveNestedChains();
+
+        assertThat(targetsOf("package q; class Q { private p.A.Chain c; void go() { c.next(); } }"))
+            .containsExactly("p.A.Chain#next()");
+    }
+
+    private void saveInterceptorTypes() {
+        for (String c : new String[]{"p.CmdInterceptor", "p.QryInterceptor"}) {
+            saveClass(c, NodeType.SERVICE);
+            saveClass(c + ".Chain", NodeType.SERVICE);
+            saveMethod(c + ".Chain", "proceed", "");
+        }
+    }
+
+    private static final String TWO_INTERCEPTORS =
+        "package p; interface CmdInterceptor { interface Chain { void proceed(); } }"
+        + " interface QryInterceptor { interface Chain { void proceed(); } } ";
+
+    @Test
+    void aMemberTypeInheritedFromAnImplementedInterfaceBindsInsteadOfTheAmbiguousSimpleName() {
+        saveInterceptorTypes();
+        saveClass("p.Audit", NodeType.SERVICE);
+        saveMethod("p.Audit", "intercept", "Chain");
+
+        assertThat(targetsOf(TWO_INTERCEPTORS
+            + "class Audit implements CmdInterceptor { void intercept(Chain chain) { chain.proceed(); } }"))
+            .containsExactly("p.CmdInterceptor.Chain#proceed()");
+    }
+
+    @Test
+    void aMemberTypeInheritedThroughASuperclassDeclaredInTheSameFileBinds() {
+        saveInterceptorTypes();
+        saveClass("p.Base", NodeType.SERVICE);
+        saveClass("p.Audit2", NodeType.SERVICE);
+        saveMethod("p.Audit2", "intercept", "Chain");
+
+        assertThat(targetsOf(TWO_INTERCEPTORS + "class Base implements CmdInterceptor {}"
+            + " class Audit2 extends Base { void intercept(Chain chain) { chain.proceed(); } }"))
+            .containsExactly("p.CmdInterceptor.Chain#proceed()");
+    }
+
+    @Test
+    void aMemberTypeInheritedFromTwoSupertypesAtOneLevelResolvesToNothing() {
+        saveInterceptorTypes();
+        saveClass("p.Both", NodeType.SERVICE);
+        saveMethod("p.Both", "intercept", "Chain");
+
+        assertThat(targetsOf(TWO_INTERCEPTORS
+            + "class Both implements CmdInterceptor, QryInterceptor { void intercept(Chain chain) { chain.proceed(); } }"))
+            .isEmpty();
+    }
+
+    @Test
+    void aDottedReturnTypeBindsAChainedCall() {
+        saveClass("p.Maker", NodeType.SERVICE);
+        saveMethod("p.Maker", "make", "");
+        saveMethod("p.Maker", "use", "Maker");
+        saveClass("p.Outer", NodeType.SERVICE);
+        saveClass("p.Outer.Inner", NodeType.SERVICE);
+        saveMethod("p.Outer.Inner", "run", "");
+
+        var extractor = new MethodCallExtractor(store);
+        var edges = new java.util.ArrayList<>(extractor.extract(StaticJavaParser.parse(
+            "package p; class Outer { static class Inner { void run() {} } }"
+            + " class Maker { Outer.Inner make() { return null; } void use(Maker x) { x.make().run(); } }")));
+        edges.addAll(extractor.resolvePending());
+
+        assertThat(edges).extracting(Edge::targetId).contains("p.Outer.Inner#run()");
+    }
 }

@@ -21,6 +21,12 @@ public class ProjectDetector {
         try {
             Files.walkFileTree(projectPath, new SimpleFileVisitor<>() {
                 @Override
+                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                    return ProjectIndexer.inNestedWorktree(projectPath, dir)
+                        ? FileVisitResult.SKIP_SUBTREE : FileVisitResult.CONTINUE;
+                }
+
+                @Override
                 public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
                     if (!file.toString().endsWith(".java")) return FileVisitResult.CONTINUE;
                     if (file.toString().contains("build") || file.toString().contains(".gradle"))

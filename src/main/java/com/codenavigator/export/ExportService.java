@@ -44,8 +44,9 @@ public class ExportService {
         var sb = new StringBuilder();
         sb.append("graph LR\n");
 
+        var packages = new PackageNames(nodes);
         var byPackage = nodes.stream().collect(Collectors.groupingBy(
-            n -> extractPackage(n.qualifiedName()), LinkedHashMap::new, Collectors.toList()));
+            n -> packages.of(n.qualifiedName()), LinkedHashMap::new, Collectors.toList()));
 
         Map<String, String> idToName = nodes.stream().collect(Collectors.toMap(Node::id, Node::name));
 
@@ -97,8 +98,9 @@ public class ExportService {
         var sb = new StringBuilder();
         sb.append("@startuml\n");
 
+        var packages = new PackageNames(nodes);
         var byPackage = nodes.stream().collect(Collectors.groupingBy(
-            n -> extractPackage(n.qualifiedName()), LinkedHashMap::new, Collectors.toList()));
+            n -> packages.of(n.qualifiedName()), LinkedHashMap::new, Collectors.toList()));
 
         Map<String, String> idToName = nodes.stream().collect(Collectors.toMap(Node::id, Node::name));
 
@@ -119,11 +121,6 @@ public class ExportService {
 
         sb.append("@enduml\n");
         return sb.toString();
-    }
-
-    private static String extractPackage(String qualifiedName) {
-        int lastDot = qualifiedName.lastIndexOf('.');
-        return lastDot > 0 ? qualifiedName.substring(0, lastDot) : qualifiedName;
     }
 
     private static String mermaidId(String name) {

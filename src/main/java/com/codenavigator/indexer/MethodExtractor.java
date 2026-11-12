@@ -34,9 +34,16 @@ public class MethodExtractor {
      * node that carries its identity and edges.
      *
      * @param overrideCandidate carries {@code @Override}, so an OVERRIDES edge should be sought
+     * @param endLine last source line of the declaration (0 when unknown); {@code node.lineNumber()}
+     *                is the first
      */
     public record ExtractedMethod(MethodRecord record, Node node, String declaringClassId,
-                                  List<String> paramTypes, boolean overrideCandidate) {}
+                                  List<String> paramTypes, boolean overrideCandidate, int endLine) {
+        public ExtractedMethod(MethodRecord record, Node node, String declaringClassId,
+                               List<String> paramTypes, boolean overrideCandidate) {
+            this(record, node, declaringClassId, paramTypes, overrideCandidate, 0);
+        }
+    }
 
     /**
      * Extract methods for every non-data node declared in {@code cu}.
@@ -51,7 +58,7 @@ public class MethodExtractor {
             .map(pd -> pd.getNameAsString()).orElse("");
 
         cu.findAll(ClassOrInterfaceDeclaration.class).forEach(decl -> {
-            String qualifiedName = qualify(packageName, decl.getNameAsString());
+            String qualifiedName = JavaTypeResolver.typeId(packageName, decl);
             var owner = nodes.stream().filter(n -> n.id().equals(qualifiedName)).findFirst();
             if (owner.isEmpty()) return;
             if (DATA_TYPES.contains(owner.get().type())) return;
@@ -87,14 +94,43 @@ public class MethodExtractor {
                     lastModified);
 
                 results.add(new ExtractedMethod(record, node, qualifiedName, paramTypes,
-                    hasAnnotation(m, "Override")));
+                    hasAnnotation(m, "Override"), m.getEnd().map(p -> p.line).orElse(node.lineNumber())));
             });
+
+            // Constructors: one <init> node per declared constructor. An instance initializer block
+            // in a class that declares none gets one implicit <init>() to hang its calls on.
+            if (!decl.isInterface()) {
+                decl.getConstructors().forEach(c -> {
+                    var paramTypes = c.getParameters().stream()
+                        .map(p -> MethodIds.simplifyType(p.getTypeAsString()))
+                        .toList();
+                    String modifiers = c.getModifiers().stream()
+                        .map(mod -> mod.getKeyword().asString()).collect(Collectors.joining(" "));
+                    String params = c.getParameters().stream()
+                        .map(p -> p.getTypeAsString() + " " + p.getNameAsString())
+                        .collect(Collectors.joining(", "));
+                    String signature = (modifiers.isBlank() ? "" : modifiers + " ")
+                        + c.getNameAsString() + "(" + params + ")";
+                    var init = initNode(qualifiedName, paramTypes, filePath,
+                        c.getBegin().map(p -> p.line).orElse(owner.get().lineNumber()),
+                        signature, lastModified);
+                    results.add(new ExtractedMethod(init.record(), init.node(), init.declaringClassId(),
+                        init.paramTypes(), false,
+                        c.getEnd().map(p -> p.line).orElse(init.node().lineNumber())));
+                });
+                boolean hasInstanceInit = decl.getMembers().stream()
+                    .anyMatch(m -> m instanceof InitializerDeclaration i && !i.isStatic());
+                if (decl.getConstructors().isEmpty() && hasInstanceInit) {
+                    results.add(initNode(qualifiedName, List.of(), filePath,
+                        owner.get().lineNumber(), decl.getNameAsString() + "()", lastModified));
+                }
+            }
         });
 
         // Records: components stay signature rows so the briefing can render model shapes,
         // but they are data and never become nodes.
         cu.findAll(RecordDeclaration.class).forEach(decl -> {
-            String qualifiedName = qualify(packageName, decl.getNameAsString());
+            String qualifiedName = JavaTypeResolver.typeId(packageName, decl);
             var owner = nodes.stream().filter(n -> n.id().equals(qualifiedName)).findFirst();
             if (owner.isEmpty()) return;
 
@@ -109,8 +145,13 @@ public class MethodExtractor {
         return results;
     }
 
-    private static String qualify(String packageName, String simpleName) {
-        return packageName.isEmpty() ? simpleName : packageName + "." + simpleName;
+    /** A constructor node: no signature row (it is not a method), only graph identity. */
+    private static ExtractedMethod initNode(String classId, List<String> paramTypes, String filePath,
+                                            int line, String signature, long lastModified) {
+        String id = MethodIds.of(classId, MethodIds.INIT, paramTypes);
+        var node = new Node(id, NodeType.METHOD, MethodIds.INIT, id, filePath, line, signature,
+            lastModified);
+        return new ExtractedMethod(null, node, classId, paramTypes, false);
     }
 
     private static String visibilityOf(MethodDeclaration m, ClassOrInterfaceDeclaration decl) {

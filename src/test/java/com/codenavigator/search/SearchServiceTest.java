@@ -58,11 +58,10 @@ class SearchServiceTest {
     }
 
     @Test
-    void contextSearchTracesManySeedsInOneWalk() {
-        // Thirty nodes match every keyword and all hang off one hub, so each seed's own chain is
-        // the whole 31-node component. Tracing per seed cost 30 x 31 expansions; on a real project
-        // "modify sales order cancellation" (hundreds of hits, a 10,615-node component) never
-        // returned. One shared walk expands each node once, whatever the number of seeds.
+    void contextSearchReadsTheGraphOnceWhateverTheNumberOfSeeds() {
+        // Thirty nodes match every keyword and all hang off one hub. Ranking loads all nodes and
+        // edges in bulk: no per-node edge lookups, whatever the number of seeds. The default file
+        // budget of ten then holds back the other twenty seeds (was: every node of the component).
         try (var counting = new CountingStore(tempDir.resolve("many-seeds.db"))) {
             counting.saveNode(new Node("com.ledger.Ledger", NodeType.CLASS,
                 "Ledger", "com.ledger.Ledger", "ledger.java", 1, "public class Ledger", 0));
@@ -76,11 +75,79 @@ class SearchServiceTest {
 
             var results = service.contextSearch("modify sales order cancellation");
 
-            // Nothing lost: every seed and the hub they reach, once each.
-            assertThat(results).hasSize(31);
-            // Bounded by the graph, not by seeds x graph: one lookup per direction per node.
-            assertThat(counting.edgeLookups).isLessThanOrEqualTo(2 * 31);
+            assertThat(results).hasSize(10);
+            assertThat(results).extracting(Node::filePath).doesNotHaveDuplicates();
+            assertThat(counting.edgeLookups).isZero();
         }
+    }
+
+    @Test
+    void contextSearchStopsAtTheFileBudgetInsideALargeComponent() {
+        // One seed at the head of a 61-node chain over 61 files. The whole component used to come
+        // back; now at most the budgeted files, nearest the seed first.
+        store.saveNode(new Node("com.gadget.Gadget", NodeType.CLASS, "Gadget", "com.gadget.Gadget",
+            "gadget.java", 1, "public class Gadget", 0));
+        String previous = "com.gadget.Gadget";
+        for (int i = 0; i < 60; i++) {
+            String id = "com.chain.Part" + i;
+            store.saveNode(new Node(id, NodeType.CLASS, "Part" + i, id, "part" + i + ".java", 1, "class Part" + i, 0));
+            store.saveEdge(new Edge("chain" + i, EdgeType.CALLS_METHOD, previous, id));
+            previous = id;
+        }
+
+        var results = searchService.contextSearch("gadget", 10);
+
+        assertThat(results).extracting(Node::filePath).doesNotHaveDuplicates().hasSizeLessThanOrEqualTo(10);
+        assertThat(results).hasSizeLessThan(61);
+        assertThat(results.get(0).name()).isEqualTo("Gadget");
+        assertThat(results).extracting(Node::name).contains("Part0", "Part1").doesNotContain("Part59");
+    }
+
+    @Test
+    void contextSearchRanksANodeLinkedToTwoSeedsAboveOnesLinkedToOneOrNone() {
+        store.saveNode(new Node("com.GadgetOne", NodeType.CLASS, "GadgetOne", "com.GadgetOne", "g1.java", 1, "class GadgetOne", 0));
+        store.saveNode(new Node("com.GadgetTwo", NodeType.CLASS, "GadgetTwo", "com.GadgetTwo", "g2.java", 1, "class GadgetTwo", 0));
+        store.saveNode(new Node("com.Linker", NodeType.CLASS, "Linker", "com.Linker", "linker.java", 1, "class Linker", 0));
+        store.saveNode(new Node("com.Lone", NodeType.CLASS, "Lone", "com.Lone", "lone.java", 1, "class Lone", 0));
+        store.saveNode(new Node("com.Stranger", NodeType.CLASS, "Stranger", "com.Stranger", "stranger.java", 1, "class Stranger", 0));
+        store.saveEdge(new Edge("l1", EdgeType.CALLS_METHOD, "com.Linker", "com.GadgetOne"));
+        store.saveEdge(new Edge("l2", EdgeType.CALLS_METHOD, "com.Linker", "com.GadgetTwo"));
+        store.saveEdge(new Edge("l3", EdgeType.CALLS_METHOD, "com.Lone", "com.GadgetOne"));
+
+        var names = searchService.contextSearch("gadget").stream().map(Node::name).toList();
+
+        assertThat(names.indexOf("Linker")).isGreaterThanOrEqualTo(0).isLessThan(names.indexOf("Lone"));
+        // Reached from no seed: score zero, never returned.
+        assertThat(names).doesNotContain("Stranger");
+    }
+
+    @Test
+    void contextSearchNeverRanksANonSeedAboveASeed() {
+        store.saveNode(new Node("com.GadgetOne", NodeType.CLASS, "GadgetOne", "com.GadgetOne", "g1.java", 1, "class GadgetOne", 0));
+        store.saveNode(new Node("com.GadgetTwo", NodeType.CLASS, "GadgetTwo", "com.GadgetTwo", "g2.java", 1, "class GadgetTwo", 0));
+        store.saveNode(new Node("com.Linker", NodeType.CLASS, "Linker", "com.Linker", "linker.java", 1, "class Linker", 0));
+        store.saveEdge(new Edge("l1", EdgeType.CALLS_METHOD, "com.Linker", "com.GadgetOne"));
+        store.saveEdge(new Edge("l2", EdgeType.CALLS_METHOD, "com.Linker", "com.GadgetTwo"));
+
+        var names = searchService.contextSearch("gadget").stream().map(Node::name).toList();
+
+        assertThat(names.indexOf("Linker")).isEqualTo(names.size() - 1);
+    }
+
+    @Test
+    void contextSearchLeavesOutTestSourcesAndLibraries() {
+        store.saveNode(new Node("com.GadgetOne", NodeType.CLASS, "GadgetOne", "com.GadgetOne", "g1.java", 1, "class GadgetOne", 0));
+        store.saveNode(new Node("com.GadgetTest", NodeType.CLASS, "GadgetTest", "com.GadgetTest",
+            "src/test/java/com/GadgetTest.java", 1, "class GadgetTest", 0));
+        store.saveNode(new Node("com.Helper", NodeType.CLASS, "Helper", "com.Helper",
+            "src/test/java/com/Helper.java", 1, "class Helper", 0));
+        store.saveNode(new Node("lib:gadget-lib", NodeType.LIBRARY, "gadget-lib", "gadget-lib", "", 0, "", 0));
+        store.saveEdge(new Edge("t1", EdgeType.CALLS_METHOD, "com.Helper", "com.GadgetOne"));
+        store.saveEdge(new Edge("t2", EdgeType.USES_LIBRARY, "com.GadgetOne", "lib:gadget-lib"));
+
+        var names = searchService.contextSearch("gadget").stream().map(Node::name).toList();
+
+        assertThat(names).containsExactly("GadgetOne");
     }
 
     @Test
@@ -212,5 +279,20 @@ class SearchServiceTest {
             edgeLookups++;
             return super.findEdgesTo(targetId);
         }
+    }
+
+    @Test
+    void aQuestionTaskSeedsTheSameNodesAsItsSubjectAlone() {
+        var plain = searchService.contextSearch("worker").stream().map(Node::id).toList();
+        var asked = searchService.contextSearch("where does worker happen").stream().map(Node::id).toList();
+        assertThat(plain).isNotEmpty();
+        assertThat(asked).isEqualTo(plain);
+        assertThat(searchService.extractKeywords("where does worker happen")).containsExactly("worker");
+    }
+
+    @Test
+    void aTaskOfOnlyStopWordsYieldsNoResult() {
+        assertThat(searchService.contextSearch("where does it happen when")).isEmpty();
+        assertThat(searchService.hasKeywordSeed("where does it happen")).isFalse();
     }
 }

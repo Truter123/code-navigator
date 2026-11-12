@@ -79,6 +79,31 @@ public class GraphStore implements AutoCloseable {
 
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_methods_node ON methods(node_id)");
 
+            // Types started from outside the code (static main, picocli @Command). A separate table,
+            // not a nodes column: CREATE IF NOT EXISTS opens an old index unchanged, and INSERT OR
+            // REPLACE on nodes cannot wipe it.
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS entry_points (
+                    node_id TEXT PRIMARY KEY
+                )""");
+
+            // The indexed class a METHOD's declared return type resolves to, so a call chain
+            // a.b().c() can be resolved through a file that is not parsed in this run. Rows only for
+            // a return type that names exactly one indexed type. Additive, like entry_points.
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS method_return_class (
+                    method_id TEXT PRIMARY KEY,
+                    class_id TEXT NOT NULL
+                )""");
+
+            // SHA-256 of a Java file's declared shape (see JavaFileShape): what a later sync compares
+            // to tell a body-only edit from a change other files can see.
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS file_shapes (
+                    file_path TEXT PRIMARY KEY,
+                    shape_hash TEXT NOT NULL
+                )""");
+
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type)");
@@ -221,6 +246,16 @@ public class GraphStore implements AutoCloseable {
                 ps.executeUpdate();
             }
 
+            try (PreparedStatement ps = connection.prepareStatement("DELETE FROM entry_points WHERE node_id = ?")) {
+                ps.setString(1, id);
+                ps.executeUpdate();
+            }
+
+            try (PreparedStatement ps = connection.prepareStatement("DELETE FROM method_return_class WHERE method_id = ?")) {
+                ps.setString(1, id);
+                ps.executeUpdate();
+            }
+
             try (PreparedStatement ps = connection.prepareStatement("DELETE FROM nodes WHERE id = ?")) {
                 ps.setString(1, id);
                 ps.executeUpdate();
@@ -244,6 +279,12 @@ public class GraphStore implements AutoCloseable {
 
             for (String nodeId : nodeIds) {
                 deleteNode(nodeId);
+            }
+
+            // The file is gone or about to be re-indexed; its shape goes with its nodes.
+            try (PreparedStatement ps = connection.prepareStatement("DELETE FROM file_shapes WHERE file_path = ?")) {
+                ps.setString(1, filePath);
+                ps.executeUpdate();
             }
         } catch (SQLException e) {
             throw new RuntimeException("Failed to delete nodes by file path: " + filePath, e);
@@ -403,6 +444,7 @@ public class GraphStore implements AutoCloseable {
 
         for (Node node : findNoIncomingEdgeNodes(typeFilter)) {
             if (EXCLUDED_ROOT_TYPES.contains(node.type())) continue;
+            if (node.type() == NodeType.METHOD && MethodIds.isConstructor(node.id())) continue;  // frameworks call constructors
             if (isTestSource(node.filePath())) {
                 result.add(new DeadCodeCandidate(node, DeadCodeConfidence.TEST_SOURCE,
                     "Test source — JUnit/Vitest invoke it reflectively, so it has no incoming " +
@@ -427,7 +469,8 @@ public class GraphStore implements AutoCloseable {
                     "by manual SQL, an external tool, or code outside this project."));
                 continue;
             }
-            DeadCodeConfidence confidence = HIGH_CONFIDENCE_TYPES.contains(node.type())
+            boolean entryPoint = isMainOrCommandClass(node);
+            DeadCodeConfidence confidence = HIGH_CONFIDENCE_TYPES.contains(node.type()) && !entryPoint
                 ? DeadCodeConfidence.HIGH : DeadCodeConfidence.MEDIUM;
             String reason = confidence == DeadCodeConfidence.HIGH
                 ? "No incoming edges, no live supertype, not a framework entry point — " +
@@ -441,6 +484,9 @@ public class GraphStore implements AutoCloseable {
 
         for (Node node : findUsedOnlyByTestsNodes(typeFilter)) {
             if (EXCLUDED_ROOT_TYPES.contains(node.type())) continue;
+            if (node.type() == NodeType.METHOD && MethodIds.isConstructor(node.id())) continue;
+            // A library a test imports (JUnit, AssertJ) is a dependency, not code to remove.
+            if (node.type() == NodeType.LIBRARY) continue;
             result.add(new DeadCodeCandidate(node, DeadCodeConfidence.USED_ONLY_BY_TESTS,
                 "Has incoming edges, but every one of them originates in test code — unused by " +
                 "production code as far as the graph shows. May be intentional test scaffolding, " +
@@ -448,6 +494,140 @@ public class GraphStore implements AutoCloseable {
         }
 
         return result;
+    }
+
+    /** Record whether a type is an entry point (static {@code main}, picocli {@code @Command}). */
+    public void setEntryPoint(String nodeId, boolean entryPoint) {
+        String sql = entryPoint ? "INSERT OR IGNORE INTO entry_points (node_id) VALUES (?)"
+                                : "DELETE FROM entry_points WHERE node_id = ?";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, nodeId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to set entry point: " + nodeId, e);
+        }
+    }
+
+    private boolean isMainOrCommandClass(Node node) {
+        return isEntryPoint(node.id());
+    }
+
+    public boolean isEntryPoint(String nodeId) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT 1 FROM entry_points WHERE node_id = ?")) {
+            ps.setString(1, nodeId);
+            return ps.executeQuery().next();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to check entry point: " + nodeId, e);
+        }
+    }
+
+    // ---- Return classes and file shapes (facts a single-file re-extraction needs) ----
+
+    public void saveReturnClass(String methodId, String classId) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "INSERT OR REPLACE INTO method_return_class (method_id, class_id) VALUES (?, ?)")) {
+            ps.setString(1, methodId);
+            ps.setString(2, classId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to save return class: " + methodId, e);
+        }
+    }
+
+    public Optional<String> findReturnClass(String methodId) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT class_id FROM method_return_class WHERE method_id = ?")) {
+            ps.setString(1, methodId);
+            ResultSet rs = ps.executeQuery();
+            return rs.next() ? Optional.of(rs.getString(1)) : Optional.empty();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to find return class: " + methodId, e);
+        }
+    }
+
+    /** Every stored (method id -> return class id), for tests and snapshots. */
+    public java.util.Map<String, String> getAllReturnClasses() {
+        var result = new java.util.TreeMap<String, String>();
+        try (Statement stmt = connection.createStatement()) {
+            ResultSet rs = stmt.executeQuery("SELECT method_id, class_id FROM method_return_class");
+            while (rs.next()) result.put(rs.getString(1), rs.getString(2));
+            return result;
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to read return classes", e);
+        }
+    }
+
+    /** Drop the rows of every method declared by {@code classId}; a re-extracted file replaces them. */
+    public void deleteReturnClassesOfClass(String classId) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "DELETE FROM method_return_class WHERE substr(method_id, 1, length(?)) = ?")) {
+            String prefix = classId + MethodIds.SEPARATOR;
+            ps.setString(1, prefix);
+            ps.setString(2, prefix);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to delete return classes of: " + classId, e);
+        }
+    }
+
+    public void deleteAllReturnClasses() {
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("DELETE FROM method_return_class");
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to delete return classes", e);
+        }
+    }
+
+    public void saveFileShape(String filePath, String shapeHash) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "INSERT OR REPLACE INTO file_shapes (file_path, shape_hash) VALUES (?, ?)")) {
+            ps.setString(1, filePath);
+            ps.setString(2, shapeHash);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to save file shape: " + filePath, e);
+        }
+    }
+
+    public Optional<String> findFileShape(String filePath) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT shape_hash FROM file_shapes WHERE file_path = ?")) {
+            ps.setString(1, filePath);
+            ResultSet rs = ps.executeQuery();
+            return rs.next() ? Optional.of(rs.getString(1)) : Optional.empty();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to find file shape: " + filePath, e);
+        }
+    }
+
+    /** Every stored (file path -> shape hash), for tests and snapshots. */
+    public java.util.Map<String, String> getAllFileShapes() {
+        var result = new java.util.TreeMap<String, String>();
+        try (Statement stmt = connection.createStatement()) {
+            ResultSet rs = stmt.executeQuery("SELECT file_path, shape_hash FROM file_shapes");
+            while (rs.next()) result.put(rs.getString(1), rs.getString(2));
+            return result;
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to read file shapes", e);
+        }
+    }
+
+    public void deleteAllFileShapes() {
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("DELETE FROM file_shapes");
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to delete file shapes", e);
+        }
+    }
+
+    /** Clear the entry-point side-table; indexFull re-derives it from the sources. */
+    public void deleteAllEntryPoints() {
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("DELETE FROM entry_points");
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to delete entry points", e);
+        }
     }
 
     /** Same "no incoming edges" query as {@link #findDeadNodes}, but without the hardcoded
@@ -546,6 +726,21 @@ public class GraphStore implements AutoCloseable {
             .anyMatch(e -> e.type() != EdgeType.IMPLEMENTS && e.type() != EdgeType.EXTENDS);
     }
 
+    /**
+     * Remove every node and its FTS rows. A full index starts from here so that no node of an id
+     * scheme an older jar produced outlives it: ids are the key, so a re-save replaces a node but
+     * never removes one that is no longer produced. Edges, entry points and return classes are
+     * cleared separately by the caller.
+     */
+    public void deleteAllNodes() {
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('delete-all')");
+            stmt.execute("DELETE FROM nodes");
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to delete all nodes", e);
+        }
+    }
+
     public void deleteAllEdges() {
         try (Statement stmt = connection.createStatement()) {
             stmt.execute("DELETE FROM edges");
@@ -581,6 +776,21 @@ public class GraphStore implements AutoCloseable {
             stmt.execute("DELETE FROM methods");
         } catch (SQLException e) {
             throw new RuntimeException("Failed to delete methods", e);
+        }
+    }
+
+    /**
+     * Delete every edge whose source is a node of the file (class and METHOD nodes alike, METHOD
+     * nodes carry the file path). Inbound edges from other files are left alone: the incremental
+     * sync re-emits only what the changed file owns.
+     */
+    public void deleteEdgesOwnedByFile(String filePath) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "DELETE FROM edges WHERE source_id IN (SELECT id FROM nodes WHERE file_path = ?)")) {
+            ps.setString(1, filePath);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to delete edges owned by file: " + filePath, e);
         }
     }
 
@@ -769,9 +979,9 @@ public class GraphStore implements AutoCloseable {
     }
 
     private List<NodeCount> topByEdges(String endColumn, int limit, String packagePrefix, boolean typesOnly) {
-        String where = (packagePrefix == null ? "" : "n.qualified_name LIKE ? ESCAPE '\\' ")
-            + (packagePrefix != null && typesOnly ? "AND " : "")
-            + (typesOnly ? "n.type <> 'METHOD' " : "");
+        // A library is not code to change: every importer points at it, so it would top the fan-in list.
+        String where = (packagePrefix == null ? "" : "n.qualified_name LIKE ? ESCAPE '\\' AND ")
+            + (typesOnly ? "n.type <> 'METHOD' AND " : "") + "n.type <> 'LIBRARY' ";
         String scope = where.isEmpty() ? "" : "WHERE " + where;
         String sql = "SELECT n.*, COUNT(e.id) as edge_count FROM nodes n JOIN edges e ON e." + endColumn
             + " = n.id " + scope + "GROUP BY n.id ORDER BY edge_count DESC LIMIT ?";

@@ -11,7 +11,10 @@ echo ""
 echo "Building code-navigator..."
 cd "$MCP_DIR"
 ./gradlew shadowJar -q
-cp build/libs/code-navigator-0.1.0.jar "$SCRIPT_DIR/code-navigator.jar"
+# Copy next to the target, then rename: sessions that have the old jar open keep their file.
+# A plain cp rewrites the open file in place and can crash every running server.
+cp build/libs/code-navigator-0.1.0.jar "$SCRIPT_DIR/code-navigator.jar.new"
+mv -f "$SCRIPT_DIR/code-navigator.jar.new" "$SCRIPT_DIR/code-navigator.jar"
 echo "  -> code-navigator.jar"
 
 echo ""

@@ -29,13 +29,31 @@ public class SyncIfDirtyCommand implements Runnable {
                 return;
             }
 
-            var dbPath = ProjectPaths.graphDb(root);
-            try (var store = new GraphStore(dbPath)) {
-                var indexer = new ProjectIndexer(store);
-                indexer.indexIncremental(root);
+            // Another run is indexing this project: leave the mark for the next hook and go.
+            var held = IndexLock.tryAcquire(root);
+            if (held.isEmpty()) {
+                return;
             }
+            try (var lock = held.get()) {
+                // The run that held the lock a moment ago may have cleared the mark already.
+                if (!Files.exists(dirtyFile)) {
+                    return;
+                }
+                String mark = Files.readString(dirtyFile);
 
-            Files.deleteIfExists(dirtyFile);
+                var dbPath = ProjectPaths.graphDb(root);
+                try (var store = new GraphStore(dbPath)) {
+                    var indexer = new ProjectIndexer(store);
+                    var result = indexer.indexIncremental(root);
+                    if (result.line() != null) System.out.println(result.line());
+                }
+
+                // An edit during the run rewrote the mark; this run may have missed that file,
+                // so the mark stays and the next hook syncs again.
+                if (Files.exists(dirtyFile) && mark.equals(Files.readString(dirtyFile))) {
+                    Files.deleteIfExists(dirtyFile);
+                }
+            }
         } catch (Exception e) {
             System.err.println("sync-if-dirty failed: " + e.getMessage());
         }
